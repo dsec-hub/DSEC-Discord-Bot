@@ -1,8 +1,8 @@
 use poise::CreateReply;
-use serenity::all::{Colour, CreateEmbed, GuildId, User};
+use serenity::all::{ChannelType, Colour, CreateEmbed, CreateEmbedFooter, GuildId, User};
 
 use crate::{Context, Error};
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 /// Show this help menu
 #[poise::command(track_edits, slash_command)]
@@ -123,53 +123,60 @@ pub async fn serverinfo(ctx: Context<'_>) -> Result<(), Error> {
         guild.as_deref().unwrap().member_count
     };
 
-    let server_description_option = &partial_guild.description;
+    // count different types of channels
+    let channels_hashmap = partial_guild.clone().channels(ctx).await?;
+
+    let guild_channels = channels_hashmap.into_values();
+
+    let mut counts: HashMap<ChannelType, u32> = HashMap::new();
+
+    for channel in guild_channels {
+        let kind = match channel.kind {
+            ChannelType::Category => ChannelType::Category,
+            ChannelType::Text => ChannelType::Text,
+            ChannelType::Voice => ChannelType::Voice,
+            _ => ChannelType::default(),
+        };
+
+        *counts.entry(kind).or_insert(0) += 1;
+    }
+
+    let category_channel_count = counts.get(&ChannelType::Category).unwrap_or(&0);
+    let text_channel_count = counts.get(&ChannelType::Text).unwrap_or(&0);
+    let voice_channel_count = counts.get(&ChannelType::Voice).unwrap_or(&0);
 
     let server_id = &partial_guild.id;
     let server_name = &partial_guild.name;
-    // let no_of_members = &discord_server.approximate_member_count.unwrap();
     let owner_id = &partial_guild.owner_id;
 
+    let server_description_option = &partial_guild.description;
     let server_description = server_description_option.as_deref().unwrap_or("N/A");
 
     let server_icon = &partial_guild.icon_url().unwrap_or_default();
 
-    let roles: &Vec<String> = &partial_guild
-        .roles
-        .into_keys()
-        .filter(|role_id| format!("{}", role_id) != format!("{}", server_id))
-        .map(|role_id| format!("<@&{}>", role_id))
-        .collect();
-
-    let rules_channel_id = &partial_guild.rules_channel_id;
-
-    let rules_channel = if rules_channel_id.is_none() {
+    let rules_channel = if (&partial_guild.rules_channel_id).is_none() {
         "N/A"
     } else {
-        &format!("<#{}>", rules_channel_id.unwrap())
+        &format!("<#{}>", &partial_guild.rules_channel_id.unwrap())
     };
+
+    let embed_footer = CreateEmbedFooter::new(format!("ID: {}", server_id));
 
     let result_embed_msg = CreateEmbed::new()
         .thumbnail(server_icon)
-        .title("Server Info")
-        .description(format!(
-            "
-            **Name**: {}\n\
-            **ID**: {}\n\
-            **Owner**: <@{}>\n\
-            **Description**: {}\n\
-            **Rules Channel**: {}\n\
-            **No. of Members**: {}\n\
-            **Roles**: {}
-            ",
-            server_id,
-            server_name,
-            owner_id,
-            server_description,
-            rules_channel,
-            member_count,
-            roles.join(" ")
-        ))
+        .title(server_name)
+        .field("Owner", format!("<@{}>", owner_id), true)
+        .field("Rules", rules_channel, true)
+        .field("Members", format!("{}", member_count), true)
+        .field(
+            "Category Channels",
+            format!("{}", category_channel_count),
+            true,
+        )
+        .field("Text Channels", format!("{}", text_channel_count), true)
+        .field("Voice Channels", format!("{}", voice_channel_count), true)
+        .field("Description", server_description, false)
+        .footer(embed_footer)
         .color(embed_color);
 
     ctx.send(CreateReply::default().embed(result_embed_msg))
