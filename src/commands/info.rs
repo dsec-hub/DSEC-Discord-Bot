@@ -1,7 +1,6 @@
+use crate::{Context, Error};
 use poise::CreateReply;
 use serenity::all::{ChannelType, Colour, CreateEmbed, CreateEmbedFooter, GuildId, User};
-
-use crate::{Context, Error};
 use std::{collections::HashMap, time::Instant};
 
 /// Show this help menu

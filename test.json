@@ -1,0 +1,82 @@
+[
+	{
+		"location": {
+			"name": "Melbourne",
+			"region": "Victoria",
+			"country": "Australia",
+			"lat": -37.8167,
+			"lon": 144.9667,
+			"tz_id": "Australia/Melbourne",
+			"localtime_epoch": 1762687144,
+			"localtime": "2025-11-09 22:19"
+		},
+		"current": {
+			"last_updated_epoch": 1762686900,
+			"last_updated": "2025-11-09 22:15",
+			"temp_c": 12.3,
+			"is_day": 0,
+			"condition": {
+				"text": "Partly cloudy",
+				"icon": "//cdn.weatherapi.com/weather/64x64/night/116.png",
+				"code": 1003
+			},
+			"wind_mph": 5.4,
+			"wind_kph": 8.6,
+			"wind_degree": 263,
+			"wind_dir": "W",
+			"pressure_mb": 1017.0,
+			"pressure_in": 30.03,
+			"precip_mm": 0.03,
+			"precip_in": 0.0,
+			"humidity": 71,
+			"cloud": 75,
+			"feelslike_c": 11.6,
+			"feelslike_f": 52.9,
+			"vis_km": 10.0,
+			"vis_miles": 6.0,
+			"uv": 0.0,
+			"gust_mph": 9.4,
+			"gust_kph": 15.1
+		}
+	},
+	{
+		"location": {
+			"name": "Canberra",
+			"region": "Australian Capital Territory",
+			"country": "Australia",
+			"lat": -35.283,
+			"lon": 149.217,
+			"tz_id": "Australia/Sydney",
+			"localtime_epoch": 1762687326,
+			"localtime": "2025-11-09 22:22"
+		},
+		"current": {
+			"last_updated_epoch": 1762686900,
+			"last_updated": "2025-11-09 22:15",
+			"temp_c": 12.3,
+			"is_day": 0,
+			"condition": {
+				"text": "Partly cloudy",
+				"icon": "//cdn.weatherapi.com/weather/64x64/night/116.png",
+				"code": 1003
+			},
+			"wind_mph": 4.9,
+			"wind_kph": 7.9,
+			"wind_degree": 74,
+			"wind_dir": "ENE",
+			"pressure_mb": 1015.0,
+			"pressure_in": 29.97,
+			"precip_mm": 0.0,
+			"precip_in": 0.0,
+			"humidity": 71,
+			"cloud": 50,
+			"feelslike_c": 11.7,
+			"feelslike_f": 53.1,
+			"vis_km": 10.0,
+			"vis_miles": 6.0,
+			"uv": 0.0,
+			"gust_mph": 7.5,
+			"gust_kph": 12.1
+		}
+	}
+]

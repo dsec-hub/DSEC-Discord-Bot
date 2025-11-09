@@ -1,5 +1,5 @@
 #![warn(clippy::str_to_string)]
-use dotenv;
+use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
 mod commands;
 
@@ -11,7 +11,7 @@ type Context<'a> = poise::Context<'a, Data, Error>;
 
 #[tokio::main]
 async fn main() {
-    dotenv::dotenv().ok();
+    dotenv().ok();
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
     let intents = serenity::GatewayIntents::non_privileged();
 
@@ -22,6 +22,7 @@ async fn main() {
                 commands::info::ping(),
                 commands::info::userinfo(),
                 commands::info::serverinfo(),
+                commands::weather::weather(),
             ],
             ..Default::default()
         })
