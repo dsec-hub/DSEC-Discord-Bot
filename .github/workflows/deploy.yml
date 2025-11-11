@@ -17,7 +17,7 @@ jobs:
               run: |
                   echo "Starting Docker Compose with --build and --force-recreate..."
                   cd ~/dsec_bot
-                  docker-compose up -d --build --force-recreate
+                  sudo docker-compose up -d --build --force-recreate
 
                   echo "Deployment complete."
 
@@ -25,4 +25,4 @@ jobs:
             - name: Clean up old Docker images
               run: |
                   echo "Cleaning up dangling Docker images..."
-                  docker image prune -f
+                  sudo docker image prune -f
