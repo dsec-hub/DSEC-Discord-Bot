@@ -14,8 +14,6 @@ async fn get_weather(location: String) -> Result<String, Error> {
     // retrieve weather data
     let response = reqwest::get(request_url).await?.text().await?;
 
-    // process weather data
-
     Ok(response)
 }
 
@@ -48,9 +46,9 @@ pub async fn weather(
         .field("Condition", format!("{}", weather_condition), true)
         .field("Temperature", format!("{} °C", weather_temp), true)
         .field("Feels like", format!("{} °C", weather_feels_like), true)
-        .field("wind", format!("{} kph", weather_wind_kph), true)
-        .field("humidity", format!("{}%", weather_humidity), true)
-        .field("cloud", format!("{}%", weather_cloud), true)
+        .field("Wind", format!("{} kph", weather_wind_kph), true)
+        .field("Humidity", format!("{}%", weather_humidity), true)
+        .field("Cloud", format!("{}%", weather_cloud), true)
         .thumbnail(format!("https:{}", weather_icon));
 
     ctx.send(CreateReply::default().embed(embed)).await?;
