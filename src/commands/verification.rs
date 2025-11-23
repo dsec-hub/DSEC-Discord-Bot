@@ -26,8 +26,20 @@ struct VerificationModal {
     student_id: String,
 }
 
+#[poise::command(slash_command, subcommands("embed", "myself"))]
+pub async fn verify(_: ApplicationContext<'_>) -> Result<(), Error> {
+    Ok(())
+}
+
 #[poise::command(slash_command)]
-pub async fn verify(ctx: ApplicationContext<'_>) -> Result<(), Error> {
+pub async fn myself(ctx: ApplicationContext<'_>) -> Result<(), Error> {
+    verify_member(ctx).await?;
+
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn embed(ctx: ApplicationContext<'_>) -> Result<(), Error> {
     let reply: CreateReply = {
         let embed: CreateEmbed = CreateEmbed::new()
             .title("Verify your DSEC membership")
