@@ -1,17 +1,47 @@
-#![warn(clippy::str_to_string)]
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use supabase::prelude::*;
 mod commands;
 
-struct Data {}
+pub struct Data {
+    pub state: AppState,
+}
 
 // Types used by all command functions
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
+#[derive(Clone)]
+pub struct AppState {
+    pub supabase: Arc<Client>,
+    pub student_cache: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl AppState {
+    pub fn new() -> Result<Self> {
+        dotenv().ok();
+        let supabase_url = std::env::var("SUPABASE_URL").expect("missing SUPABASE_URL");
+        let supabase_key = std::env::var("SUPABASE_KEY").expect("missing SUPABASE_KEY");
+        let client = Client::new(&supabase_url, &supabase_key)?;
+
+        Ok(Self {
+            supabase: Arc::new(client),
+            student_cache: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    dotenv().ok();
+    dotenv().ok(); // load env
+
+    let app_state = AppState::new().expect("Failed to initialize AppState");
+
+    // -- discord bot start --
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
     let intents = serenity::GatewayIntents::non_privileged();
 
@@ -24,13 +54,16 @@ async fn main() {
                 commands::info::serverinfo(),
                 commands::info::botinfo(),
                 commands::weather::weather(),
+                commands::verification::verify(),
             ],
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(Data {})
+                Ok(Data {
+                    state: app_state.clone(),
+                })
             })
         })
         .build();
@@ -43,4 +76,6 @@ async fn main() {
         .start()
         .await
         .expect("Client failed to start 2");
+
+    // -- discord bot end --
 }
