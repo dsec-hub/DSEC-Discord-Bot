@@ -2,10 +2,7 @@ use crate::{Data, Error};
 use dotenv::dotenv;
 use poise::{CreateReply, Modal};
 use serde::{Deserialize, Serialize};
-use serenity::all::{
-    ComponentInteractionCollector, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter,
-    GuildId, RoleId,
-};
+use serenity::all::{CreateEmbed, CreateEmbedFooter, GuildId, RoleId};
 
 type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
 

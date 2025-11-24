@@ -55,11 +55,21 @@ async fn main() {
                 commands::info::botinfo(),
                 commands::weather::weather(),
                 commands::verification::verify(),
+                commands::mods_only::embed(),
             ],
+            event_handler: |_ctx, _event, _framework, _data| {
+                Box::pin(async move {
+                    // println!("Got an event in event handler: {:?}", event);
+
+                    Ok(())
+                })
+            },
+
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
+                println!("Logged in as {}", _ready.user.name);
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data { state: app_state })
             })
