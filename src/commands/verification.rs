@@ -1,10 +1,10 @@
-use crate::{Data, Error};
+use crate::{ApplicationContext, Error};
 use dotenv::dotenv;
 use poise::{CreateReply, Modal};
 use serde::{Deserialize, Serialize};
-use serenity::all::{CreateEmbed, CreateEmbedFooter, GuildId, RoleId};
-
-type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
+use serenity::all::{
+    CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter, GuildId, RoleId,
+};
 
 #[derive(Deserialize, Serialize, Debug)]
 struct StudentRow {
@@ -24,47 +24,48 @@ struct VerificationModal {
     student_id: String,
 }
 
-// #[poise::command(slash_command, subcommands("embed", "myself"))]
-// pub async fn verify(_: ApplicationContext<'_>) -> Result<(), Error> {
-//     Ok(())
-// }
+#[poise::command(slash_command, subcommands("embed", "myself"))]
+pub async fn verify(_: ApplicationContext<'_>) -> Result<(), Error> {
+    Ok(())
+}
 
 /// Verify your DSEC club membership to obtain role
 #[poise::command(slash_command)]
-pub async fn verify(ctx: ApplicationContext<'_>) -> Result<(), Error> {
+pub async fn myself(ctx: ApplicationContext<'_>) -> Result<(), Error> {
     verify_member(ctx).await?;
 
     Ok(())
 }
 
-// #[poise::command(slash_command)]
-// pub async fn verify(ctx: ApplicationContext<'_>) -> Result<(), Error> {
-//     let reply: CreateReply = {
-//         let embed: CreateEmbed = CreateEmbed::new()
-//             .title("Verify your DSEC membership")
-//             .description("Click **Verify Here** and enter your **Full name** and **Student ID** (e.g., s123456789). Your responses are private.");
+#[poise::command(slash_command)]
+pub async fn embed(ctx: ApplicationContext<'_>) -> Result<(), Error> {
+    let reply: CreateReply = {
+        let embed: CreateEmbed = CreateEmbed::new()
+            .title("Verify your DSEC membership")
+            .description("Click **Verify Here** and enter your **Full name** and **Student ID** (e.g., s123456789). Your responses are private.");
 
-//         let button: CreateButton = CreateButton::new("verify").label("Verify Here");
+        let button: CreateButton = CreateButton::new("verify").label("Verify Here");
 
-//         let components = vec![CreateActionRow::Buttons(vec![button])];
+        let components = vec![CreateActionRow::Buttons(vec![button])];
 
-//         CreateReply::default()
-//             .ephemeral(false)
-//             .embed(embed)
-//             .components(components)
-//     };
+        CreateReply::default()
+            .ephemeral(false)
+            .embed(embed)
+            .components(components)
+    };
 
-//     ctx.send(reply).await?;
+    ctx.send(reply).await?;
 
-//     while let Some(_) = ComponentInteractionCollector::new(ctx.serenity_context())
-//         .filter(move |mci| mci.data.custom_id == "verify")
-//         .await
-//     {
-//         verify_member(ctx).await?;
-//     }
+    // let mut stream = ComponentInteractionCollector::new(ctx.serenity_context())
+    //     .filter(move |mci| mci.data.custom_id == "verify")
+    //     .stream();
 
-//     Ok(())
-// }
+    // while let Some(_) = stream.next().await {
+    //     verify_member(ctx).await?;
+    // }
+
+    Ok(())
+}
 
 // flow:
 // 1. check correct discord server -> layer 1

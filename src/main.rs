@@ -4,8 +4,9 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use supabase::prelude::*;
+use supabase::Client;
 mod commands;
+mod events;
 
 pub struct Data {
     pub state: AppState,
@@ -14,6 +15,7 @@ pub struct Data {
 // Types used by all command functions
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
+type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,7 +24,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> supabase::Result<Self> {
         dotenv().ok();
         let supabase_url = std::env::var("SUPABASE_URL").expect("missing SUPABASE_URL");
         let supabase_key = std::env::var("SUPABASE_KEY").expect("missing SUPABASE_KEY");
@@ -33,6 +35,24 @@ impl AppState {
             student_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
+}
+
+async fn event_handler(
+    ctx: &serenity::Context,
+    event: &serenity::FullEvent,
+    _framework: poise::FrameworkContext<'_, Data, Error>,
+    _data: &Data,
+) -> Result<(), Error> {
+    match event {
+        serenity::FullEvent::Ready { data_about_bot, .. } => {
+            events::ready::on_ready(ctx, data_about_bot).await?;
+        }
+        serenity::FullEvent::InteractionCreate { interaction } => {
+            events::interaction_create::on_interaction_create(ctx, interaction).await?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -57,19 +77,14 @@ async fn main() {
                 commands::verification::verify(),
                 commands::mods_only::embed(),
             ],
-            event_handler: |_ctx, _event, _framework, _data| {
-                Box::pin(async move {
-                    // println!("Got an event in event handler: {:?}", event);
-
-                    Ok(())
-                })
+            event_handler: |ctx, event, framework, data| {
+                Box::pin(event_handler(ctx, event, framework, data))
             },
 
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
-                println!("Logged in as {}", _ready.user.name);
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data { state: app_state })
             })
