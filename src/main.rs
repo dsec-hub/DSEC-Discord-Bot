@@ -8,6 +8,7 @@ use supabase::Client;
 mod commands;
 mod events;
 
+#[derive(Debug)]
 pub struct Data {
     pub state: AppState,
 }
@@ -17,7 +18,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AppState {
     pub supabase: Arc<Client>,
     pub student_cache: Arc<Mutex<HashMap<String, String>>>,
@@ -41,14 +42,14 @@ async fn event_handler(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
     _framework: poise::FrameworkContext<'_, Data, Error>,
-    _data: &Data,
+    data: &Data,
 ) -> Result<(), Error> {
     match event {
         serenity::FullEvent::Ready { data_about_bot, .. } => {
             events::ready::on_ready(ctx, data_about_bot).await?;
         }
         serenity::FullEvent::InteractionCreate { interaction } => {
-            events::interaction_create::on_interaction_create(ctx, interaction).await?;
+            events::interaction_create::on_interaction_create(ctx, interaction, &data).await?;
         }
         _ => {}
     }
