@@ -1,9 +1,6 @@
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Mutex};
 use supabase::Client;
 mod commands;
 mod events;
@@ -18,10 +15,10 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AppState {
-    pub supabase: Arc<Client>,
-    pub student_cache: Arc<Mutex<HashMap<String, String>>>,
+    pub supabase: Client,
+    pub student_cache: Mutex<HashMap<String, String>>,
 }
 
 impl AppState {
@@ -32,8 +29,8 @@ impl AppState {
         let client = Client::new(&supabase_url, &supabase_key)?;
 
         Ok(Self {
-            supabase: Arc::new(client),
-            student_cache: Arc::new(Mutex::new(HashMap::new())),
+            supabase: client,
+            student_cache: Mutex::new(HashMap::new()),
         })
     }
 }
