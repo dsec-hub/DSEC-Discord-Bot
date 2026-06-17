@@ -5,8 +5,7 @@ use crate::{
     commands::verification::{StudentRow, VerificationModal},
 };
 use ::serenity::all::{
-    ComponentInteraction, Context, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, GuildId, RoleId,
+    ComponentInteraction, Context, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage, GuildId, RoleId
 };
 use dotenv::dotenv;
 use poise::{modal, serenity_prelude as serenity};
@@ -205,6 +204,9 @@ pub async fn on_interaction_create(
                 format!("You have been assigned the <@&{}> role!", verified_role_id),
             )
             .await?;
+
+            // post to logs channel
+            
         } else {
             embed_followup(
                 ctx,

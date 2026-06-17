@@ -48,6 +48,9 @@ async fn event_handler(
         serenity::FullEvent::InteractionCreate { interaction } => {
             events::interaction_create::on_interaction_create(ctx, interaction, &data).await?;
         }
+        serenity::FullEvent::Message { new_message } => {
+            events::message::on_message(ctx, new_message).await?;
+        }
         _ => {}
     }
     Ok(())
@@ -61,7 +64,7 @@ async fn main() {
 
     // -- discord bot start --
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
-    let intents = serenity::GatewayIntents::non_privileged();
+    let intents = serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -96,7 +99,7 @@ async fn main() {
         .expect("Client failed to start")
         .start()
         .await
-        .expect("Client failed to start 2");
+        .expect("Client failed to start");
 
     // -- discord bot end --
 }
