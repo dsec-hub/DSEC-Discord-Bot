@@ -1,11 +1,10 @@
 use crate::{Context, Error};
 use dotenv::dotenv;
-use poise::CreateReply;
-use serenity::{all::CreateEmbed, builder::CreateMessage, model::id::ChannelId};
+use poise::{serenity_prelude as serenity, CreateReply};
 
 /// Send message to logs channel
 pub async fn log_embed(
-    ctx: Context<'_>,
+    ctx: &serenity::Context,
     title: Option<String>,
     title_url: Option<String>,
     description: Option<String>,
@@ -16,7 +15,7 @@ pub async fn log_embed(
     timestamp: Option<bool>,
 ) -> Result<(), Error> {
     dotenv().ok();
-    let mut embed = CreateEmbed::new();
+    let mut embed = serenity::CreateEmbed::new();
 
     // Set title and title URL
     if let Some(title) = title {
@@ -33,7 +32,7 @@ pub async fn log_embed(
 
     // Set footer
     if let Some(footer_text) = footer {
-        embed = embed.footer(serenity::all::CreateEmbedFooter::new(footer_text));
+        embed = embed.footer(serenity::CreateEmbedFooter::new(footer_text));
     }
 
     // Set color (parse hex color)
@@ -55,7 +54,7 @@ pub async fn log_embed(
 
     // Set timestamp
     if timestamp.unwrap_or(false) {
-        embed = embed.timestamp(serenity::model::Timestamp::now());
+        embed = embed.timestamp(serenity::Timestamp::now());
     }
 
     // Send the embed
@@ -63,8 +62,8 @@ pub async fn log_embed(
         .expect("missing LOGS_CHANNEL_ID")
         .parse::<u64>()
         .expect("Invalid LOGS_CHANNEL_ID value");
-    let logs_channel_id = ChannelId::new(logs_channel_id_env);
-    let builder = CreateMessage::new().embed(embed);
+    let logs_channel_id = serenity::ChannelId::new(logs_channel_id_env);
+    let builder = serenity::CreateMessage::new().embed(embed);
 
     let send_log = logs_channel_id.send_message(ctx, builder).await;
     send_log.expect("LOG FAIL");
@@ -89,7 +88,7 @@ pub async fn embed(
     #[description = "Image URL"] image_url: Option<String>,
     #[description = "Show timestamp"] timestamp: Option<bool>,
 ) -> Result<(), Error> {
-    let mut embed = CreateEmbed::new();
+    let mut embed = serenity::CreateEmbed::new();
 
     // Set title and title URL
     if let Some(title) = title {
@@ -106,7 +105,7 @@ pub async fn embed(
 
     // Set footer
     if let Some(footer_text) = footer {
-        embed = embed.footer(serenity::all::CreateEmbedFooter::new(footer_text));
+        embed = embed.footer(serenity::CreateEmbedFooter::new(footer_text));
     }
 
     // Set color (parse hex color)
@@ -128,7 +127,7 @@ pub async fn embed(
 
     // Set timestamp
     if timestamp.unwrap_or(false) {
-        embed = embed.timestamp(serenity::model::Timestamp::now());
+        embed = embed.timestamp(serenity::Timestamp::now());
     }
 
     // Send the embed
