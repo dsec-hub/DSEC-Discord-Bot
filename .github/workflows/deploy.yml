@@ -14,12 +14,12 @@ jobs:
               uses: actions/checkout@v4
 
             - name: Build and deploy with Docker Compose
+              working-directory: /home/ubuntu/dsec_bot
               run: |
                   echo "Starting Docker Compose with --build and --force-recreate..."
-                  cd ~/dsec_bot
                   sudo git pull
-                  sudo docker-compose build
-                  sudo docker-compose up -d --force-recreate
+                  sudo docker compose build
+                  sudo docker compose up -d --build
 
                   echo "Deployment complete."
 
