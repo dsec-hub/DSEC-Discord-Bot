@@ -64,7 +64,8 @@ async fn main() {
 
     // -- discord bot start --
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
-    let intents = serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
+    let intents =
+        serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -77,6 +78,7 @@ async fn main() {
                 commands::weather::weather(),
                 commands::verification::verify(),
                 commands::mods_only::embed(),
+                commands::member_info::member_info(),
             ],
             event_handler: |ctx, event, framework, data| {
                 Box::pin(event_handler(ctx, event, framework, data))

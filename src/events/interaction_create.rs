@@ -15,6 +15,13 @@ use ::serenity::{
 use dotenv::dotenv;
 use poise::Modal as _;
 use poise::serenity_prelude as serenity;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct DiscordMemberRow {
+    pub student_id: String,
+    pub discord_id: String,
+}
 
 /// Read the verified role id from the environment.
 fn verified_role_id() -> RoleId {
@@ -75,14 +82,44 @@ async fn collect_verification_modal(
     }
 }
 
+/// Add to dsec_discord_members table (skips insert if already recorded).
+async fn add_dsec_discord_table(
+    data: &Data,
+    student_id: &str,
+    member_id: &String,
+) -> Result<(), Error> {
+    if member_recorded(data, member_id).await? {
+        return Ok(());
+    }
+
+    let new_member = serde_json::json!({
+        "student_id": student_id,
+        "discord_id": member_id,
+    });
+
+    let _: Vec<DiscordMemberRow> = data
+        .state
+        .supabase
+        .database()
+        .insert("dsec_discord_members")
+        .values(new_member)?
+        .execute()
+        .await?;
+
+    Ok(())
+}
+
 /// Assign the verified role and send the success response.
 async fn grant_verified_role(
     ctx: &Context,
+    data: &Data,
     modal_submit: &ModalInteraction,
     discord_member: &Member,
+    student_id: &String,
     verified_role_id: RoleId,
     via_cache: bool,
 ) -> Result<(), Error> {
+    add_dsec_discord_table(data, student_id, &discord_member.user.id.to_string()).await?;
     discord_member.add_role(ctx, verified_role_id).await?;
 
     let mut embed = CreateEmbed::new().title("Verified ✅").description(format!(
@@ -132,6 +169,19 @@ async fn fetch_student(data: &Data, student_id: &str) -> Result<Option<StudentRo
     Ok(student_data.into_iter().next())
 }
 
+async fn member_recorded(data: &Data, user_id: &String) -> Result<bool, Error> {
+    let rows: Vec<serde_json::Value> = data
+        .state
+        .supabase
+        .database()
+        .from("dsec_discord_members")
+        .select("discord_id")
+        .eq("discord_id", user_id)
+        .execute()
+        .await?;
+    Ok(!rows.is_empty())
+}
+
 /// Handle a click on the "verify" button: collect the modal, then verify the
 /// submitted student id/name against the cache and database.
 async fn handle_verify(
@@ -154,26 +204,36 @@ async fn handle_verify(
     };
 
     let verified_role_id = verified_role_id();
-    let user_id = component_interaction.user.id;
-    let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
 
-    if discord_member.roles.contains(&verified_role_id) {
-        component_interaction
-            .create_response(
-                ctx,
-                ephemeral_embed(CreateEmbed::new().title("Already Verified ✅").description(
-                    format!("You already have the <@&{}> role!", verified_role_id),
-                )),
-            )
-            .await?;
-        return Ok(());
+    // Fast, no-network "already verified" check using the member data that is
+    // already attached to the button interaction. Anything slower than this
+    // (a DB query, a member fetch) must NOT run before the modal is shown, or
+    // Discord's ~3s acknowledgement window elapses and the click fails.
+    if let Some(member) = &component_interaction.member {
+        if member.roles.contains(&verified_role_id) {
+            component_interaction
+                .create_response(
+                    ctx,
+                    ephemeral_embed(CreateEmbed::new().title("Already Verified ✅").description(
+                        format!("You already have the <@&{}> role!", verified_role_id),
+                    )),
+                )
+                .await?;
+            return Ok(());
+        }
     }
 
+    // Respond to the click with the modal immediately.
     let Some((modal_submit, modal_data)) =
         collect_verification_modal(ctx, component_interaction).await?
     else {
         return Ok(());
     };
+
+    // From here on we hold the modal-submit token, so the slower member fetch
+    // and database work below is no longer racing the button's ack window.
+    let user_id = component_interaction.user.id;
+    let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
 
     let input_student_id = modal_data.student_id.to_lowercase();
     let student_id = input_student_id
@@ -181,7 +241,16 @@ async fn handle_verify(
         .unwrap_or(&input_student_id);
 
     if cached_name_matches(data, student_id, &modal_data.name) {
-        grant_verified_role(ctx, &modal_submit, &discord_member, verified_role_id, true).await?;
+        grant_verified_role(
+            ctx,
+            data,
+            &modal_submit,
+            &discord_member,
+            &student_id.to_string(),
+            verified_role_id,
+            true,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -202,7 +271,16 @@ async fn handle_verify(
     cache_student(data, student_id, &student.full_name);
 
     if student.full_name.to_lowercase() == modal_data.name.to_lowercase() {
-        grant_verified_role(ctx, &modal_submit, &discord_member, verified_role_id, false).await?;
+        grant_verified_role(
+            ctx,
+            data,
+            &modal_submit,
+            &discord_member,
+            &student_id.to_string(),
+            verified_role_id,
+            false,
+        )
+        .await?;
     } else {
         modal_submit
             .create_response(
