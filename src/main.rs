@@ -1,7 +1,7 @@
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
 use std::{collections::HashMap, sync::Mutex};
-use supabase::Client;
+use supabase::prelude::Client;
 mod commands;
 mod events;
 
@@ -22,11 +22,32 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> supabase::Result<Self> {
+    pub async fn new() -> supabase::Result<Self> {
         dotenv().ok();
         let supabase_url = std::env::var("SUPABASE_URL").expect("missing SUPABASE_URL");
         let supabase_key = std::env::var("SUPABASE_KEY").expect("missing SUPABASE_KEY");
+        let supabase_user_email =
+            std::env::var("SUPABASE_USER_EMAIL").expect("missing SUPABASE_USER_EMAIL");
+        let supabase_user_password =
+            std::env::var("SUPABASE_USER_PASSWORD").expect("missing SUPABASE_USER_PASSWORD");
         let client = Client::new(&supabase_url, &supabase_key)?;
+        let auth_response = client
+            .auth()
+            .sign_in_with_email_and_password(&supabase_user_email, &supabase_user_password)
+            .await?;
+
+        if auth_response.user.is_none() {
+            println!("User not found");
+        } else {
+            println!(
+                "User signed in: {}",
+                auth_response
+                    .user
+                    .expect("User not found")
+                    .email
+                    .expect("Email not found")
+            );
+        }
 
         Ok(Self {
             supabase: client,
@@ -60,7 +81,9 @@ async fn event_handler(
 async fn main() {
     dotenv().ok(); // load env
 
-    let app_state = AppState::new().expect("Failed to initialize AppState");
+    let app_state = AppState::new()
+        .await
+        .expect("Failed to initialize AppState");
 
     // -- discord bot start --
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
