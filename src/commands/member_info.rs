@@ -52,11 +52,13 @@ pub async fn member_info(ctx: ApplicationContext<'_>) -> Result<(), Error> {
     // if not present
     let Some(student_id) = linked_student_id else {
         ctx.send(
-            CreateReply::default().embed(
-                CreateEmbed::new()
-                    .title("Re-verification required")
-                    .description("Verify your membership in <#1433595503190474854>"),
-            ),
+            CreateReply::default()
+                .embed(
+                    CreateEmbed::new()
+                        .title("Re-verification required")
+                        .description("Verify your membership in <#1433595503190474854>"),
+                )
+                .ephemeral(true),
         )
         .await?;
         return Ok(());
