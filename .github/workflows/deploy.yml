@@ -1,30 +1,39 @@
 name: Docker Compose Deploy
 
 on:
-    push:
-        branches:
-            - main # Trigger this workflow on pushes to the main branch
+  push:
+    branches:
+      - main
 
 jobs:
-    build_and_deploy:
-        runs-on: [self-hosted, linux] # Use the labels you assigned to your self-hosted runner
+  build_and_deploy:
+    runs-on: [self-hosted, linux]
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 1
 
-            - name: Build and deploy with Docker Compose
-              working-directory: /home/ubuntu/dsec_bot
-              run: |
-                  echo "Starting Docker Compose with --build and --force-recreate..."
-                  sudo git pull
-                  sudo docker compose build
-                  sudo docker compose up -d --build
+      - name: Create environment file
+        working-directory: ${{ github.workspace }}
+        env:
+          DOT_ENV: ${{ secrets.DOT_ENV }}
+        run: |
+          if [ -z "$DOT_ENV" ]; then
+            echo "DOT_ENV secret is missing or empty."
+            exit 1
+          fi
 
-                  echo "Deployment complete."
+          umask 077
+          printf '%s\n' "$DOT_ENV" > .env
 
-            # Optional: Clean up old Docker images to save disk space
-            - name: Clean up old Docker images
-              run: |
-                  echo "Cleaning up dangling Docker images..."
-                  sudo docker image prune -f
+      - name: Build and deploy
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo docker compose up -d --build --force-recreate
+          echo "Deployment complete."
+
+      - name: Clean up old Docker images
+        run: sudo docker image prune -f
