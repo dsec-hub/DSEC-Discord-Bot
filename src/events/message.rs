@@ -3,9 +3,9 @@ use ::serenity::model::id::{ChannelId, GuildId};
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
 
-pub async fn on_message(
+async fn honeypot(
     ctx: &serenity::Context,
-    new_message: &serenity::Message,
+    new_message: &serenity::Message
 ) -> Result<(), Error> {
     dotenv().ok();
     // check if it's the honeypot channel
@@ -45,6 +45,15 @@ pub async fn on_message(
             .await?;
         }
     }
+
+    Ok(())
+}
+
+pub async fn on_message(
+    ctx: &serenity::Context,
+    new_message: &serenity::Message,
+) -> Result<(), Error> {
+    let _ = honeypot(ctx, new_message).await?;
 
     Ok(())
 }

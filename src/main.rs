@@ -31,22 +31,21 @@ impl AppState {
         let supabase_user_password =
             std::env::var("SUPABASE_USER_PASSWORD").expect("missing SUPABASE_USER_PASSWORD");
         let client = Client::new(&supabase_url, &supabase_key)?;
-        let auth_response = client
+
+        match client
             .auth()
             .sign_in_with_email_and_password(&supabase_user_email, &supabase_user_password)
-            .await?;
-
-        if auth_response.user.is_none() {
-            println!("User not found");
-        } else {
-            println!(
-                "User signed in: {}",
-                auth_response
-                    .user
-                    .expect("User not found")
-                    .email
-                    .expect("Email not found")
-            );
+            .await
+        {
+            Ok(auth_response) => match auth_response.user.and_then(|user| user.email) {
+                Some(email) => println!("User signed in: {email}"),
+                None => println!("User not found"),
+            },
+            Err(err) => {
+                eprintln!(
+                    "Failed to connect/sign in to Supabase, continuing setup anyways: {err}"
+                );
+            }
         }
 
         Ok(Self {
