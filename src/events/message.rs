@@ -3,10 +3,7 @@ use ::serenity::model::id::{ChannelId, GuildId};
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
 
-async fn honeypot(
-    ctx: &serenity::Context,
-    new_message: &serenity::Message
-) -> Result<(), Error> {
+async fn honeypot(ctx: &serenity::Context, new_message: &serenity::Message) -> Result<(), Error> {
     dotenv().ok();
     // check if it's the honeypot channel
     let discord_guild_id = std::env::var("GUILD_ID")
@@ -49,11 +46,34 @@ async fn honeypot(
     Ok(())
 }
 
+async fn create_leetcode_thread(
+    ctx: &serenity::Context,
+    new_message: &serenity::Message,
+) -> Result<(), Error> {
+    dotenv().ok();
+
+    let leetcode_channel_id_env = std::env::var("LEETCODE_CHANNEL_ID")
+        .expect("missing LEETCODE_CHANNEL_ID")
+        .parse::<u64>()
+        .expect("Invalid LEETCODE_CHANNEL_ID value");
+
+    let leetcode_channel_id = ChannelId::new(leetcode_channel_id_env);
+
+    let current_channel_id = &new_message.channel_id;
+
+    if leetcode_channel_id.eq(current_channel_id) {
+        let new_thread = serenity::CreateThread::new("🧠 DSEC LeetCode Challenge Answers");
+        current_channel_id.create_thread_from_message(ctx, new_message.id, new_thread).await?;
+    };
+
+    Ok(())
+}
+
 pub async fn on_message(
     ctx: &serenity::Context,
     new_message: &serenity::Message,
 ) -> Result<(), Error> {
     let _ = honeypot(ctx, new_message).await?;
-
+    let _ = create_leetcode_thread(ctx, new_message).await?;
     Ok(())
 }
