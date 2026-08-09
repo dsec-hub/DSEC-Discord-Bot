@@ -62,8 +62,30 @@ async fn create_leetcode_thread(
     let current_channel_id = &new_message.channel_id;
 
     if leetcode_channel_id.eq(current_channel_id) {
-        let new_thread = serenity::CreateThread::new("🧠 DSEC LeetCode Challenge Answers");
-        current_channel_id.create_thread_from_message(ctx, new_message.id, new_thread).await?;
+        fn create_title_from_message(message: impl Into<String>) -> String {
+            let message_string: String = message.into();
+
+            let title = message_string
+                .lines()
+                .next()
+                .map(|line| {
+                    let start = line
+                        .char_indices()
+                        .nth(2)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    &line[start..]
+                })
+                .unwrap_or("")
+                .to_string();
+            title
+        }
+
+        let new_thread =
+            serenity::CreateThread::new(create_title_from_message(&new_message.content));
+        current_channel_id
+            .create_thread_from_message(ctx, new_message.id, new_thread)
+            .await?;
     };
 
     Ok(())
