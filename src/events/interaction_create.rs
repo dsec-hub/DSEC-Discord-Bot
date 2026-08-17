@@ -164,6 +164,7 @@ async fn fetch_student(data: &Data, student_id: &str) -> Result<Option<StudentRo
         .from("active_members")
         .select("full_name, student_id")
         .eq("student_id", student_id)
+        .eq("membership_status", "Active")
         .execute()
         .await?;
     Ok(student_data.into_iter().next())
