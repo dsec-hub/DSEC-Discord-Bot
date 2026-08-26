@@ -17,14 +17,14 @@ RUN mkdir src && \
     echo 'fn main() { println!("Dummy main for dependency caching"); }' > src/main.rs
 
 # Build dependencies (this layer will be cached unless Cargo.toml/Cargo.lock changes)
-RUN cargo build --release && \
+RUN cargo build --locked --release && \
     rm -rf src target/release/deps/dsec_bot*
 
 # Copy the actual source code
 COPY src ./src
 
 # Build the actual application
-RUN cargo build --release
+RUN cargo build --locked --release
 
 # Runtime stage - use a minimal image
 FROM debian:bookworm-slim

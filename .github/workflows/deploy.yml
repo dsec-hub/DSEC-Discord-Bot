@@ -4,10 +4,19 @@ on:
   push:
     branches:
       - main
+  # Manual re-run, for redeploying after a rollback or re-creating the
+  # workspace .env that the cleanup step below now removes.
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build_and_deploy:
     runs-on: [self-hosted, linux]
+    # SEC-01: this gates nothing until required reviewers are configured on the
+    # "production" environment itself. See the pull request description.
+    environment: production
 
     steps:
       - name: Checkout code
@@ -34,6 +43,11 @@ jobs:
         run: |
           sudo docker compose up -d --build --force-recreate
           echo "Deployment complete."
+
+      - name: Remove environment file
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: rm -f .env
 
       - name: Clean up old Docker images
         run: sudo docker image prune -f

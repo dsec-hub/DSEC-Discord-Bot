@@ -1,0 +1,9 @@
+# Keep the docker build context to what the Dockerfile actually COPYs
+# (Cargo.toml, Cargo.lock, src). deploy.yml writes the DOT_ENV secret to .env in
+# the workspace before running `docker compose up --build`; without this file
+# that secret is tarred into the build context and handed to the docker daemon
+# on every deploy.
+.env
+.env.*
+target/
+.git
