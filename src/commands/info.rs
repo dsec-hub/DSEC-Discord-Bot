@@ -151,10 +151,10 @@ pub async fn serverinfo(ctx: Context<'_>) -> Result<(), Error> {
     let server_description = server_description_option.as_deref().unwrap_or("N/A");
 
     // rules channel, if empty N/A
-    let rules_channel = if (&partial_guild.rules_channel_id).is_none() {
-        "N/A"
+    let rules_channel = if let Some(rules_channel_id) = partial_guild.rules_channel_id {
+        &format!("<#{}>", rules_channel_id)
     } else {
-        &format!("<#{}>", &partial_guild.rules_channel_id.unwrap())
+        "N/A"
     };
 
     let embed_footer = CreateEmbedFooter::new(format!("ID: {}", server_id));

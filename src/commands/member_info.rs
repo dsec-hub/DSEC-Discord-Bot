@@ -18,7 +18,7 @@ struct DiscordLinkRow {
     student_id: String,
 }
 
-async fn member_data(database: &Database, user_id: &String) -> Result<Option<MemberRow>, Error> {
+async fn member_data(database: &Database, user_id: &str) -> Result<Option<MemberRow>, Error> {
     let rows: Vec<MemberRow> = database
         .from("active_members")
         .select("student_id, full_name, campus, membership_status, end_date")
@@ -30,7 +30,7 @@ async fn member_data(database: &Database, user_id: &String) -> Result<Option<Mem
 }
 
 /// Look up the student id linked to a given discord user, if any.
-async fn recorded_member(database: &Database, user_id: &String) -> Result<Option<String>, Error> {
+async fn recorded_member(database: &Database, user_id: &str) -> Result<Option<String>, Error> {
     let rows: Vec<DiscordLinkRow> = database
         .from("dsec_discord_members")
         .select("student_id")
@@ -66,15 +66,7 @@ pub async fn member_info(ctx: ApplicationContext<'_>) -> Result<(), Error> {
 
     let user_data_option = member_data(&database, &student_id).await?;
 
-    if user_data_option.is_none() {
-        ctx.send(CreateReply::default().embed(
-            CreateEmbed::new().title("Couldn't find info").description(
-                "Your membership may have expired. Contact a club executive to be sure.",
-            ),
-        ))
-        .await?;
-    } else {
-        let user_data = user_data_option.expect("Member not found");
+    if let Some(user_data) = user_data_option {
         let member_name = user_data.full_name;
         let member_campus = user_data.campus;
         let membership_status = user_data.membership_status;
@@ -96,6 +88,13 @@ pub async fn member_info(ctx: ApplicationContext<'_>) -> Result<(), Error> {
                 )
                 .ephemeral(true),
         )
+        .await?;
+    } else {
+        ctx.send(CreateReply::default().embed(
+            CreateEmbed::new().title("Couldn't find info").description(
+                "Your membership may have expired. Contact a club executive to be sure.",
+            ),
+        ))
         .await?;
     }
 

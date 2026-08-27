@@ -22,6 +22,9 @@ pub struct AppState {
 }
 
 impl AppState {
+    // The large `Err` variant is `supabase::Error` from the `supabase-lib-rs` crate;
+    // boxing it would change this public signature rather than shrink their type.
+    #[allow(clippy::result_large_err)]
     pub async fn new() -> supabase::Result<Self> {
         dotenv().ok();
         let supabase_url = std::env::var("SUPABASE_URL").expect("missing SUPABASE_URL");
@@ -42,9 +45,7 @@ impl AppState {
                 None => println!("User not found"),
             },
             Err(err) => {
-                eprintln!(
-                    "Failed to connect/sign in to Supabase, continuing setup anyways: {err}"
-                );
+                eprintln!("Failed to connect/sign in to Supabase, continuing setup anyways: {err}");
             }
         }
 
@@ -66,7 +67,7 @@ async fn event_handler(
             events::ready::on_ready(ctx, data_about_bot).await?;
         }
         serenity::FullEvent::InteractionCreate { interaction } => {
-            events::interaction_create::on_interaction_create(ctx, interaction, &data).await?;
+            events::interaction_create::on_interaction_create(ctx, interaction, data).await?;
         }
         serenity::FullEvent::Message { new_message } => {
             events::message::on_message(ctx, new_message).await?;
