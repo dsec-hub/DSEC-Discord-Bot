@@ -235,15 +235,23 @@ async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
 
 #[tokio::main]
 async fn main() {
-    // Initialise logging first, before anything can log. Default to `info`:
-    // supabase-lib-rs logs generated query URLs (containing student IDs) and the
-    // service-account email at `debug`, so RUST_LOG must never be set to debug or
-    // trace on the VPS. See OPS-04 and the README.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // Initialise logging first, before anything can log. Default to `info`, then floor
+    // the supabase crate at `info` *regardless of RUST_LOG*. supabase-lib-rs logs the
+    // generated query URL — `…student_id=eq.<id>` — and the service-account email via
+    // `tracing::debug!` (its target is `supabase`, its [lib] name). That bypasses our
+    // own `redact_digits`, so an operator setting `RUST_LOG=debug` to debug something
+    // else would leak student ids. `add_directive` replaces any same-target directive
+    // parsed from RUST_LOG, so this wins over `RUST_LOG=debug` and even an explicit
+    // `RUST_LOG=supabase=debug` (only a hyper-specific `supabase::database=debug` could
+    // override it). Our own modules keep their normal level. See OPS-04 and the README.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        .add_directive(
+            "supabase=info"
+                .parse()
+                .expect("static tracing directive `supabase=info` is valid"),
+        );
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     dotenv().ok(); // load env
 

@@ -1,5 +1,6 @@
 use crate::{
-    AppState, ApplicationContext, Context, Error, events::interaction_create::DiscordMemberRow,
+    AppState, ApplicationContext, Context, Error,
+    events::interaction_create::{DiscordMemberRow, user_attempt_lock},
     redact_digits,
 };
 use poise::{CreateReply, serenity_prelude as serenity};
@@ -218,6 +219,15 @@ pub async fn unlink(
         eprintln!("[unlink] defer failed: {}", redact_digits(&err.to_string()));
         return Ok(());
     }
+
+    // Serialize against the TARGET user's own verification (SEC-19): this holds the
+    // same per-user async lock verification uses, keyed on the user being unlinked, so
+    // an in-flight verify for them cannot interleave with our delete + role removal and
+    // leave a role-with-no-row (or the inverse). Acquired AFTER defer so waiting on a
+    // running verify never eats the ack window; the tokio guard is held across the DB
+    // and Discord calls below.
+    let target_lock = user_attempt_lock(ctx.data, user.id);
+    let _target_guard = target_lock.lock().await;
 
     let user_id = user.id.to_string();
     let moderator = &interaction.user;

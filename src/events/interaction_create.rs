@@ -95,7 +95,11 @@ fn record_failure(attempts: &AttemptMap, user_id: UserId) {
 /// released before the caller awaits the returned tokio lock, so no std guard is
 /// ever held across an await. Entries no attempt is using any more (only the map
 /// still references them) are pruned so the map cannot grow without bound.
-fn user_attempt_lock(data: &Data, user_id: UserId) -> Arc<AsyncMutex<()>> {
+///
+/// Shared with `/unlink`, which acquires the lock keyed on its TARGET user so a
+/// concurrent verify for that user cannot interleave with the delete + role removal
+/// (SEC-19). Callers hold the returned tokio guard across their whole operation.
+pub(crate) fn user_attempt_lock(data: &Data, user_id: UserId) -> Arc<AsyncMutex<()>> {
     let mut locks = data
         .state
         .verify_locks
