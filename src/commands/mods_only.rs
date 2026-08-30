@@ -62,8 +62,11 @@ pub async fn log_embed(
     // Send the embed (logs_channel_id is parsed once at boot; see AppState).
     let builder = serenity::CreateMessage::new().embed(embed);
 
-    let send_log = logs_channel_id.send_message(ctx, builder).await;
-    send_log.expect("LOG FAIL");
+    // Do NOT .expect() here: this runs inside a message handler, and a panic on a
+    // transient Discord failure takes the whole handler down for that message.
+    if let Err(err) = logs_channel_id.send_message(ctx, builder).await {
+        eprintln!("[log_embed] failed to write to logs channel: {err}");
+    }
 
     Ok(())
 }

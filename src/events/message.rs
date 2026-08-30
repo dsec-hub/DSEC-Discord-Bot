@@ -12,6 +12,33 @@ async fn honeypot(
 
     if honeypot_channel_id.eq(current_channel_id) {
         let user = &new_message.author;
+
+        // Never ban a bot, a webhook, or ourselves. The honeypot exists to catch
+        // spam accounts; banning another club integration (or the bot itself)
+        // because it posted in the wrong channel is a self-inflicted outage.
+        if user.bot || new_message.webhook_id.is_some() || user.id == ctx.cache.current_user().id {
+            return Ok(());
+        }
+
+        // Never ban someone who can moderate. A moderator checking whether the
+        // honeypot works should not be the person it catches. This reads the
+        // cached guild; if it is unavailable we fall through and let the honeypot
+        // act, rather than skipping the check silently for everyone.
+        if let Some(guild_id) = new_message.guild_id
+            && let Ok(member) = guild_id.member(ctx, user.id).await
+        {
+            // Guild-level moderator identity is exactly what we want here; the
+            // deprecation is about per-channel permission overwrites, which are
+            // irrelevant to "can this person moderate at all".
+            #[allow(deprecated)]
+            let perms = member.permissions(ctx);
+            if let Ok(perms) = perms
+                && (perms.ban_members() || perms.manage_messages() || perms.administrator())
+            {
+                return Ok(());
+            }
+        }
+
         let username = &user.name;
         let user_id = &user.id;
         let avatar_url = user.avatar_url();
@@ -21,20 +48,28 @@ async fn honeypot(
             .ban_with_reason(ctx, user_id, 2, "Message sent in honeypot channel.")
             .await;
 
-        if ban_user.is_ok() {
-            log_embed(
-                ctx,
-                data.state.logs_channel_id,
-                Some("Honeypot activated!".to_string()),
-                None,
-                Some(format!("User got banned: {}", username)),
-                Some(format!("ID: {}", user_id)),
-                None,
-                avatar_url,
-                None,
-                Some(true),
-            )
-            .await?;
+        match ban_user {
+            Ok(()) => {
+                log_embed(
+                    ctx,
+                    data.state.logs_channel_id,
+                    Some("Honeypot activated!".to_string()),
+                    None,
+                    Some(format!("User got banned: {}", username)),
+                    Some(format!("ID: {}", user_id)),
+                    None,
+                    avatar_url,
+                    None,
+                    Some(true),
+                )
+                .await?;
+            }
+            // A honeypot that cannot ban is information the mods need.
+            Err(err) => {
+                eprintln!(
+                    "[honeypot] failed to ban {username} ({user_id}) in the honeypot channel: {err}"
+                );
+            }
         }
     }
 
@@ -84,7 +119,14 @@ pub async fn on_message(
     new_message: &serenity::Message,
     data: &Data,
 ) -> Result<(), Error> {
-    honeypot(ctx, new_message, data).await?;
-    create_leetcode_thread(ctx, new_message, data).await?;
+    // Independent features. A failure in one must not skip the other, and neither
+    // should propagate out of the event handler, where the default on_error only
+    // eprintln!s (OPS-04).
+    if let Err(err) = honeypot(ctx, new_message, data).await {
+        eprintln!("[on_message] honeypot failed: {err}");
+    }
+    if let Err(err) = create_leetcode_thread(ctx, new_message, data).await {
+        eprintln!("[on_message] leetcode thread failed: {err}");
+    }
     Ok(())
 }
