@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
-    Data, Error,
+    Data, Error, redact_digits,
     commands::{
         mods_only::log_embed,
         verification::{StudentRow, VerificationModal},
@@ -12,8 +13,8 @@ use crate::{
 use ::serenity::{
     all::{
         ComponentInteraction, Context, CreateEmbed, CreateInteractionResponse,
-        CreateInteractionResponseMessage, GuildId, ModalInteraction, RoleId, UserId,
-        collector::ModalInteractionCollector,
+        CreateInteractionResponseMessage, EditInteractionResponse, GuildId, ModalInteraction,
+        RoleId, UserId, collector::ModalInteractionCollector,
     },
     model::guild::Member,
 };
@@ -61,8 +62,12 @@ type AttemptMap = Mutex<HashMap<UserId, (u32, Instant)>>;
 
 /// Whether `user_id` has already failed `MAX_FAILURES` times within the current
 /// window. A window that has fully elapsed is treated as no failures.
+///
+/// Recovers a poisoned lock rather than panicking: a poisoned `verify_attempts`
+/// mutex must not turn every future verification into a panic (the map holds only
+/// counters, never invariant-critical state).
 fn is_rate_limited(attempts: &AttemptMap, user_id: UserId) -> bool {
-    let attempts = attempts.lock().expect("verify_attempts mutex poisoned");
+    let attempts = attempts.lock().unwrap_or_else(|p| p.into_inner());
     matches!(
         attempts.get(&user_id),
         Some((count, window_start))
@@ -70,16 +75,57 @@ fn is_rate_limited(attempts: &AttemptMap, user_id: UserId) -> bool {
     )
 }
 
-/// Record one failed verification attempt for `user_id`, starting a fresh window if
-/// the previous one has elapsed (or none existed).
+/// Record one failed verification attempt for `user_id`. Fully-elapsed windows are
+/// evicted first, which both resets a returning user's window and bounds the map so
+/// it cannot grow without limit.
 fn record_failure(attempts: &AttemptMap, user_id: UserId) {
-    let mut attempts = attempts.lock().expect("verify_attempts mutex poisoned");
+    let mut attempts = attempts.lock().unwrap_or_else(|p| p.into_inner());
+    attempts.retain(|_, (_, window_start)| window_start.elapsed() < ATTEMPT_WINDOW);
     match attempts.get_mut(&user_id) {
-        Some(entry) if entry.1.elapsed() < ATTEMPT_WINDOW => entry.0 += 1,
-        _ => {
+        // Any surviving entry is within the window (retain kept it), so increment.
+        Some(entry) => entry.0 += 1,
+        None => {
             attempts.insert(user_id, (1, Instant::now()));
         }
     }
+}
+
+/// Get (or create) the per-user attempt lock. The std mutex guarding the map is
+/// released before the caller awaits the returned tokio lock, so no std guard is
+/// ever held across an await. Entries no attempt is using any more (only the map
+/// still references them) are pruned so the map cannot grow without bound.
+fn user_attempt_lock(data: &Data, user_id: UserId) -> Arc<AsyncMutex<()>> {
+    let mut locks = data
+        .state
+        .verify_locks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    Arc::clone(
+        locks
+            .entry(user_id)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+}
+
+/// Edit the deferred ephemeral response for a modal submission (SEC-19 #7: we
+/// `defer_ephemeral` the moment the modal arrives, so every later reply is an edit).
+async fn edit_reply(
+    ctx: &Context,
+    modal_submit: &ModalInteraction,
+    embed: CreateEmbed,
+) -> Result<(), Error> {
+    modal_submit
+        .edit_response(ctx, EditInteractionResponse::new().embed(embed))
+        .await?;
+    Ok(())
+}
+
+/// Whether a supabase error is a Postgres unique-constraint violation (SQLSTATE
+/// 23505). Used only as a boolean signal — the error string embeds the student id
+/// (`Key (student_id)=(…)`) and must never be logged (SEC-19 #4).
+fn is_unique_violation(err: &supabase::Error) -> bool {
+    err.to_string().contains("23505")
 }
 
 /// Show the verification modal and wait for (and parse) the submission.
@@ -124,46 +170,53 @@ async fn collect_verification_modal(
 
 /// Outcome of trying to link a Discord account to a student id.
 enum LinkOutcome {
-    /// The row now exists for this Discord id (freshly inserted, or already present).
+    /// The row now exists for this Discord id (freshly inserted, or already present
+    /// with exactly this student id — an idempotent re-verify).
     Linked,
-    /// The student id is already held by a *different* Discord account; nothing was
-    /// written. Carries that other Discord id so the caller can log the conflict.
-    Refused { existing_discord_id: String },
+    /// The submitted student id is already held by a *different* Discord account;
+    /// nothing was written. Carries that other Discord id for the conflict audit.
+    RefusedIdClaimed { existing_discord_id: String },
+    /// This caller's Discord account is already linked to a *different* student id, so
+    /// it may not claim another. The stale-row / hijack path (SEC-19 #2).
+    RefusedCallerLinked,
 }
 
 /// Add to dsec_discord_members table.
 ///
-/// Idempotent for a Discord id that is already recorded. Refuses when the student id
-/// is already claimed by a *different* Discord account (SEC-19): the durable fix is a
-/// `UNIQUE` constraint on `dsec_discord_members.student_id`, but that DDL needs a
-/// duplicate sweep on live Supabase first (an owner step), so this application-level
-/// check is the safety net until then.
+/// The ownership of the *submitted* id is always checked before anything is written
+/// (SEC-19 #2): an idempotent re-verify is allowed only when this caller already owns
+/// exactly that id. A caller already linked to a *different* id is refused, closing
+/// the path where a stale COR-03 partial-insert row let an account claim someone
+/// else's id. A concurrent-insert `UNIQUE` violation (23505) is caught and converted
+/// to the same refusal (SEC-19 #3) — the constraint itself is an owner/deploy step.
 async fn add_dsec_discord_table(
     data: &Data,
     student_id: &str,
     member_id: &String,
 ) -> Result<LinkOutcome, Error> {
+    // 1. Who owns the SUBMITTED id right now? Always check before granting anything.
+    if let Some(existing_discord_id) = student_id_owner(data, student_id).await? {
+        if &existing_discord_id == member_id {
+            return Ok(LinkOutcome::Linked); // idempotent: caller already holds this id
+        }
+        return Ok(LinkOutcome::RefusedIdClaimed { existing_discord_id });
+    }
+
+    // 2. Submitted id is unowned. If this caller already holds a DIFFERENT id, refuse:
+    //    a linked account trying to claim a new student id is the hijack / stale-row path.
     if member_recorded(data, member_id).await? {
-        return Ok(LinkOutcome::Linked);
+        return Ok(LinkOutcome::RefusedCallerLinked);
     }
 
-    if let Some(existing_discord_id) = student_id_owner(data, student_id).await?
-        && &existing_discord_id != member_id
-    {
-        return Ok(LinkOutcome::Refused { existing_discord_id });
-    }
-
+    // 3. Insert. `.returning(...)` makes supabase-lib-rs send `Prefer:
+    //    return=representation`; without it PostgREST answers a POST with an empty
+    //    `return=minimal` body that fails to deserialise, aborting before the role
+    //    grant even though the row was written (COR-03).
     let new_member = serde_json::json!({
         "student_id": student_id,
         "discord_id": member_id,
     });
-
-    // `.returning(...)` makes supabase-lib-rs send `Prefer: return=representation`.
-    // Without it PostgREST defaults a POST to `return=minimal` — a 201 with an
-    // empty body — and deserialising that empty body into Vec<DiscordMemberRow>
-    // failed, aborting before the role grant even though the row was written.
-    // That is why verification failed on every member's first attempt (COR-03).
-    let _: Vec<DiscordMemberRow> = data
+    let insert: supabase::Result<Vec<DiscordMemberRow>> = data
         .state
         .supabase
         .database()
@@ -171,60 +224,82 @@ async fn add_dsec_discord_table(
         .values(new_member)?
         .returning("student_id,discord_id")
         .execute()
-        .await?;
+        .await;
 
-    Ok(LinkOutcome::Linked)
+    match insert {
+        Ok(_) => Ok(LinkOutcome::Linked),
+        // A UNIQUE(student_id) violation means another account inserted the same id
+        // between our check and our insert. Re-query the owner and refuse — never
+        // surface the raw 23505 body, which echoes the student id (SEC-19 #3, #4).
+        Err(err) if is_unique_violation(&err) => {
+            match student_id_owner(data, student_id).await? {
+                Some(owner) if &owner != member_id => {
+                    Ok(LinkOutcome::RefusedIdClaimed { existing_discord_id: owner })
+                }
+                // The winning row is ours (or has since vanished): treat as linked.
+                _ => Ok(LinkOutcome::Linked),
+            }
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
-/// The Discord id currently linked to `student_id`, if any.
+/// The Discord id currently linked to `student_id`, if any. Selects only `discord_id`
+/// (minimum columns — SEC-19 #4).
 async fn student_id_owner(data: &Data, student_id: &str) -> Result<Option<String>, Error> {
-    let rows: Vec<DiscordMemberRow> = data
+    #[derive(Deserialize)]
+    struct OwnerRow {
+        discord_id: String,
+    }
+    let rows: Vec<OwnerRow> = data
         .state
         .supabase
         .database()
         .from("dsec_discord_members")
-        .select("student_id,discord_id")
+        .select("discord_id")
         .eq("student_id", student_id)
         .execute()
         .await?;
     Ok(rows.into_iter().next().map(|row| row.discord_id))
 }
 
-/// Link the account, assign the verified role, and send the success response.
+/// A name-matched attempt: try to link the account and grant the role.
 ///
-/// If the student id is already claimed by a different Discord account the link is
-/// refused: the caller sees the generic failure embed and the conflict is logged to
-/// the logs channel with both Discord ids (never the student id).
-async fn grant_verified_role(
+/// Returns `true` when the role was granted, `false` when the link was refused (an
+/// ownership conflict or a caller already linked to a different id). On refusal the
+/// caller records exactly one failed attempt (SEC-19 #6); the user sees the generic
+/// embed either way. All responses edit the deferred ephemeral (SEC-19 #7).
+async fn link_and_grant(
     ctx: &Context,
     data: &Data,
     modal_submit: &ModalInteraction,
     discord_member: &Member,
     student_id: &str,
     verified_role_id: RoleId,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     let member_id = discord_member.user.id.to_string();
 
     match add_dsec_discord_table(data, student_id, &member_id).await? {
-        LinkOutcome::Refused { existing_discord_id } => {
-            log_link_conflict(ctx, data, &member_id, &existing_discord_id).await;
-            modal_submit
-                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
-                .await?;
-        }
         LinkOutcome::Linked => {
             discord_member.add_role(ctx, verified_role_id).await?;
-
             let embed = CreateEmbed::new().title("Verified ✅").description(format!(
                 "You have been assigned the <@&{}> role!",
                 verified_role_id
             ));
-            modal_submit
-                .create_response(ctx, ephemeral_embed(embed))
-                .await?;
+            edit_reply(ctx, modal_submit, embed).await?;
+            Ok(true)
+        }
+        LinkOutcome::RefusedIdClaimed { existing_discord_id } => {
+            log_link_conflict(ctx, data, &member_id, &existing_discord_id).await;
+            edit_reply(ctx, modal_submit, verification_failed_embed()).await?;
+            Ok(false)
+        }
+        LinkOutcome::RefusedCallerLinked => {
+            log_caller_already_linked(ctx, data, &member_id).await;
+            edit_reply(ctx, modal_submit, verification_failed_embed()).await?;
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 /// Lower-case, trim, and collapse runs of internal whitespace to one space.
@@ -317,22 +392,60 @@ async fn member_recorded(data: &Data, user_id: &str) -> Result<bool, Error> {
     Ok(!rows.is_empty())
 }
 
-/// Log a failed verification to the logs channel. Records the Discord user id, a
-/// fixed reason category and a timestamp — NEVER the submitted name or student id.
-/// The logs channel is read by humans and persists forever, so nothing a member
-/// typed into the modal may go here (SEC-19). `reason` is always a fixed literal.
-async fn log_verification_failure(ctx: &Context, data: &Data, user_id: UserId, reason: &str) {
+/// Post an audit line to the logs channel: a fixed title, the Discord user id and a
+/// timestamp only — NEVER the submitted name or student id. The logs channel is read
+/// by humans and persists forever, so nothing a member typed into the modal may go
+/// here (SEC-19). `title` and `body` are always fixed literals.
+async fn log_verify_audit(ctx: &Context, data: &Data, title: &str, body: String) {
     let _ = log_embed(
         ctx,
         data.state.logs_channel_id,
-        Some("Verification failed".to_string()),
+        Some(title.to_string()),
         None,
-        Some(format!("User <@{user_id}> (id `{user_id}`) — {reason}.")),
+        Some(body),
         None,
         None,
         None,
         None,
         Some(true),
+    )
+    .await;
+}
+
+/// Log a failed verification attempt. The description is one fixed generic string:
+/// "student id not found" and "name mismatch" must be indistinguishable in the log
+/// too, so it cannot become a mod-visible membership oracle (SEC-19 #8).
+async fn log_verification_failure(ctx: &Context, data: &Data, user_id: UserId) {
+    log_verify_audit(
+        ctx,
+        data,
+        "Verification failed",
+        format!("User <@{user_id}> (id `{user_id}`) — a verification attempt failed."),
+    )
+    .await;
+}
+
+/// Log that a user was refused because they are already at the attempt limit.
+async fn log_rate_limited(ctx: &Context, data: &Data, user_id: UserId) {
+    log_verify_audit(
+        ctx,
+        data,
+        "Verification rate-limited",
+        format!("User <@{user_id}> (id `{user_id}`) — too many attempts; refused without a database query."),
+    )
+    .await;
+}
+
+/// Log that a caller already linked to a *different* student id tried to claim a new
+/// one. Carries only the caller's Discord id — never a student id (SEC-19 #2).
+async fn log_caller_already_linked(ctx: &Context, data: &Data, member_id: &str) {
+    log_verify_audit(
+        ctx,
+        data,
+        "Verification refused: account already linked",
+        format!(
+            "<@{member_id}> (id `{member_id}`) is already linked to a different student id and tried to claim another; refused."
+        ),
     )
     .await;
 }
@@ -346,19 +459,13 @@ async fn log_link_conflict(
     attempting_discord_id: &str,
     existing_discord_id: &str,
 ) {
-    let _ = log_embed(
+    log_verify_audit(
         ctx,
-        data.state.logs_channel_id,
-        Some("Verification refused: student id already linked".to_string()),
-        None,
-        Some(format!(
+        data,
+        "Verification refused: student id already linked",
+        format!(
             "<@{attempting_discord_id}> (id `{attempting_discord_id}`) tried to verify with a student id already linked to <@{existing_discord_id}> (id `{existing_discord_id}`)."
-        )),
-        None,
-        None,
-        None,
-        None,
-        Some(true),
+        ),
     )
     .await;
 }
@@ -423,43 +530,54 @@ async fn handle_verify(
         return Ok(());
     };
 
-    // From here on we hold the modal-submit token, so the slower member fetch and
-    // database work below is no longer racing the button's ack window. Wrap that
-    // work so any failure (e.g. a database error) still sends the user an
-    // ephemeral message rather than leaving a dead "This interaction failed"
-    // interaction — poise's on_error cannot reach this modal submission (COR-03).
     let user_id = component_interaction.user.id;
 
+    // Acknowledge the modal submission within Discord's ~3s window BEFORE any database
+    // or logs-channel work, so a slow query can never leave a dead "This interaction
+    // failed" and a mutation can never happen with no ack (SEC-19 #7). Every later
+    // reply edits this deferred ephemeral response.
+    if let Err(err) = modal_submit.defer_ephemeral(ctx).await {
+        eprintln!(
+            "[verify] defer failed for interaction {}: {}",
+            modal_submit.id,
+            redact_digits(&err.to_string())
+        );
+    }
+
+    // Serialize all verification work for THIS user, held across the whole attempt, so
+    // concurrent modal submits cannot each slip under the attempt limit or the
+    // uniqueness checks (SEC-19 #5). Acquired AFTER defer so waiting on it never eats
+    // the ack window; different users never contend.
+    let attempt_lock = user_attempt_lock(data, user_id);
+    let _attempt_guard = attempt_lock.lock().await;
+
+    // Any failure inside still edits the deferred response rather than leaving the user
+    // stuck — poise's on_error cannot reach this modal submission (COR-03).
     let verify_result: Result<(), Error> = async {
-        // SEC-19: cap failed attempts before ANY database work. A user who has
-        // already failed too many times in the window gets the generic failure
-        // embed and no query runs.
+        // Cap failed attempts before ANY database work (SEC-19 #3): a user already over
+        // the limit gets the generic embed and no query runs.
         if is_rate_limited(&data.state.verify_attempts, user_id) {
-            log_verification_failure(ctx, data, user_id, "rate-limited").await;
-            modal_submit
-                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
-                .await?;
+            log_rate_limited(ctx, data, user_id).await;
+            edit_reply(ctx, &modal_submit, verification_failed_embed()).await?;
             return Ok(());
         }
 
         let student_id = normalise_student_id(&modal_data.student_id);
 
         // `fetch_student` is the only query carrying `membership_status = "Active"`,
-        // and it now runs on every attempt before any role grant (SEC-19): no cache
+        // and it runs on every attempt before any role grant (SEC-19): no cache
         // shortcut can admit a member whose membership has since lapsed.
         let Some(student) = fetch_student(data, &student_id).await? else {
             record_failure(&data.state.verify_attempts, user_id);
-            log_verification_failure(ctx, data, user_id, "no matching active membership").await;
-            modal_submit
-                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
-                .await?;
+            log_verification_failure(ctx, data, user_id).await;
+            edit_reply(ctx, &modal_submit, verification_failed_embed()).await?;
             return Ok(());
         };
 
         if name_matches(&student.full_name, &modal_data.name) {
-            // Only fetch the guild member once we know we are about to grant the role.
+            // Fetch the guild member only once we know we may grant the role.
             let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
-            grant_verified_role(
+            let granted = link_and_grant(
                 ctx,
                 data,
                 &modal_submit,
@@ -468,12 +586,16 @@ async fn handle_verify(
                 verified_role_id,
             )
             .await?;
+            // A refused link (ownership conflict, or a caller already linked to a
+            // different id) counts as exactly one failed attempt (SEC-19 #6); a
+            // successful grant counts none.
+            if !granted {
+                record_failure(&data.state.verify_attempts, user_id);
+            }
         } else {
             record_failure(&data.state.verify_attempts, user_id);
-            log_verification_failure(ctx, data, user_id, "name mismatch").await;
-            modal_submit
-                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
-                .await?;
+            log_verification_failure(ctx, data, user_id).await;
+            edit_reply(ctx, &modal_submit, verification_failed_embed()).await?;
         }
 
         Ok(())
@@ -481,21 +603,23 @@ async fn handle_verify(
     .await;
 
     if let Err(err) = verify_result {
-        eprintln!("[verify] verification failed after modal submit: {err}");
-        // Best-effort ephemeral error so the user does not see the generic
-        // "This interaction failed" with no way forward.
-        let _ = modal_submit
-            .create_response(
-                ctx,
-                ephemeral_embed(
-                    CreateEmbed::new()
-                        .title("Something went wrong")
-                        .description(
-                            "A maintainer has been notified. Please try again in a minute.",
-                        ),
-                ),
-            )
-            .await;
+        // Never print the raw error on the verify path: supabase/reqwest errors embed
+        // the PostgREST URL (…student_id=eq.<id>) and a 23505 body echoes the id, both
+        // PII. Redact digit runs; the interaction id is the correlation ref (SEC-19 #4).
+        eprintln!(
+            "[verify] interaction {} failed: {}",
+            modal_submit.id,
+            redact_digits(&err.to_string())
+        );
+        let _ = edit_reply(
+            ctx,
+            &modal_submit,
+            CreateEmbed::new().title("Something went wrong").description(format!(
+                "A maintainer has been notified. Please try again in a minute. (ref: {})",
+                modal_submit.id
+            )),
+        )
+        .await;
     }
 
     Ok(())
@@ -583,5 +707,22 @@ mod tests {
 
         // A different user is unaffected.
         assert!(!is_rate_limited(&attempts, UserId::new(2)));
+    }
+
+    #[test]
+    fn redacts_ids_but_keeps_short_numbers() {
+        // Student id (9 digits) and Discord snowflake (19) are masked.
+        assert_eq!(
+            redact_digits("student_id=eq.123456789 for <@1234567890123456789>"),
+            "student_id=eq.<redacted> for <@<redacted>>"
+        );
+        // A 23505 key detail is masked.
+        assert_eq!(
+            redact_digits("Key (student_id)=(220123456) already exists"),
+            "Key (student_id)=(<redacted>) already exists"
+        );
+        // Short runs (< 7 digits, e.g. the SQLSTATE code itself) are preserved.
+        assert_eq!(redact_digits("code 23505"), "code 23505");
+        assert_eq!(redact_digits("no digits here"), "no digits here");
     }
 }

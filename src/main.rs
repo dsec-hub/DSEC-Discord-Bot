@@ -1,9 +1,46 @@
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
-use std::{collections::HashMap, sync::Mutex, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use supabase::prelude::Client;
 mod commands;
 mod events;
+
+/// Mask any maximal run of 7+ ASCII digits so student ids (9 digits) and Discord
+/// snowflakes (17-19 digits) never reach a log line. Supabase/reqwest error text
+/// embeds the PostgREST URL (`…student_id=eq.<id>`) and a `23505` body echoes the id
+/// in a `Key (…)=(…)` detail, so any error printed on a request path must be redacted
+/// first (SEC-19). The 7-digit floor keeps short diagnostic codes (SQLSTATE like
+/// `23505`, HTTP status) intact while masking every id length we actually hold. Names
+/// never appear on these error paths (the failing queries filter by id only), and
+/// correlation ids are printed separately, never through this function.
+pub(crate) fn redact_digits(input: &str) -> String {
+    const MIN_REDACTED_RUN: usize = 7;
+    let mut out = String::with_capacity(input.len());
+    let mut digits = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if digits.len() >= MIN_REDACTED_RUN {
+            out.push_str("<redacted>");
+        } else {
+            out.push_str(&digits);
+        }
+        digits.clear();
+        out.push(ch);
+    }
+    if digits.len() >= MIN_REDACTED_RUN {
+        out.push_str("<redacted>");
+    } else {
+        out.push_str(&digits);
+    }
+    out
+}
 
 #[derive(Debug)]
 pub struct Data {
@@ -26,6 +63,13 @@ pub struct AppState {
     // in a long-lived container it was a stale-membership bypass. One query per verify
     // is not a performance problem.
     pub verify_attempts: Mutex<HashMap<serenity::UserId, (u32, Instant)>>,
+    // SEC-19: one async lock per Discord user, held across a whole verification
+    // attempt so concurrent modal submits from the same user serialize and cannot each
+    // slip under the attempt limit / uniqueness checks. A tokio Mutex (not std) because
+    // the guard is held across awaits; the std Mutex here only guards the brief
+    // get-or-insert of the map and is never held across an await. Idle entries are
+    // pruned on access so the map cannot grow without bound.
+    pub verify_locks: Mutex<HashMap<serenity::UserId, Arc<tokio::sync::Mutex<()>>>>,
     // Parsed once at boot. Re-reading these per event means a config typo takes
     // down a handler at some random future moment instead of failing the deploy.
     pub guild_id: serenity::GuildId,
@@ -106,6 +150,7 @@ impl AppState {
         Ok(Self {
             supabase: client,
             verify_attempts: Mutex::new(HashMap::new()),
+            verify_locks: Mutex::new(HashMap::new()),
             guild_id: serenity::GuildId::new(guild_id),
             honeypot_channel_id: serenity::ChannelId::new(honeypot_channel_id),
             leetcode_channel_id: serenity::ChannelId::new(leetcode_channel_id),
@@ -143,19 +188,32 @@ async fn event_handler(
 /// too, but nothing surfaces it (no tracing subscriber, no log shipping — OPS-04),
 /// so an explicit handler is set (COR-03).
 async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
-    if let poise::FrameworkError::Command { ctx, .. } = &error {
-        let _ = ctx
-            .send(
-                poise::CreateReply::default()
-                    .content(
-                        "Something went wrong — a maintainer has been notified. Please try again in a minute.",
-                    )
-                    .ephemeral(true),
-            )
-            .await;
-    }
-    if let Err(e) = poise::builtins::on_error(error).await {
-        eprintln!("[on_error] failed while handling a framework error: {e}");
+    match error {
+        poise::FrameworkError::Command { ctx, error, .. } => {
+            // Print a redacted line ourselves and reply with a fixed generic ephemeral.
+            // We deliberately do NOT forward this to `poise::builtins::on_error`: its
+            // `Command` arm does a non-ephemeral `ctx.say(raw_error)`, which would leak
+            // Supabase/DB error text (including student ids) into the channel (SEC-19).
+            eprintln!(
+                "[on_error] command '{}' failed: {}",
+                ctx.command().name,
+                redact_digits(&error.to_string())
+            );
+            let _ = ctx
+                .send(
+                    poise::CreateReply::default()
+                        .content(
+                            "Something went wrong — a maintainer has been notified. Please try again in a minute.",
+                        )
+                        .ephemeral(true),
+                )
+                .await;
+        }
+        other => {
+            if let Err(e) = poise::builtins::on_error(other).await {
+                eprintln!("[on_error] failed while handling a framework error: {e}");
+            }
+        }
     }
 }
 

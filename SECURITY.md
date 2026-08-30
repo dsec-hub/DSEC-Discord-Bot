@@ -47,12 +47,18 @@ After a manual delete, also remove the verified role from the member in Discord 
 Settings → Members, or right-click the member → Roles), or they keep their access with
 no link.
 
-## Owner-only database step (SEC-19)
+## Owner-only database step (SEC-19) — MERGE / DEPLOY GATE
 
-`dsec_discord_members.student_id` should have a `UNIQUE` constraint so one student id
-cannot be claimed by two Discord accounts. The application already refuses the second
-claimant, but the durable fix is the constraint. It is **not** applied by any migration
-in this repo — it touches live data and must be run by a maintainer.
+**This is a deploy gate, not optional.** `dsec_discord_members.student_id` MUST have a
+`UNIQUE` constraint so one student id cannot be claimed by two Discord accounts. Run
+the duplicate sweep and add the constraint (below) as part of shipping this change.
+
+The application also refuses the second claimant and catches a concurrent-insert unique
+violation (SQLSTATE 23505), converting it to a generic refusal — but the check-then-
+insert has an inherent race, so the database constraint is what actually guarantees
+uniqueness. Until the constraint exists, two accounts verifying the same unused id at
+the exact same moment can both succeed. The constraint is **not** applied by any
+migration in this repo — it touches live data and must be run by a maintainer.
 
 Sweep for existing duplicates first; the DDL fails if any exist:
 
