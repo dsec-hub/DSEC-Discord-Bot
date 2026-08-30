@@ -152,22 +152,40 @@ fn normalise_student_id(raw: &str) -> String {
     lowered.strip_prefix('s').unwrap_or(&lowered).to_string()
 }
 
-/// True when the submitted name is the roster name, or every word the student
-/// typed appears in the roster name in the same order. Lets "John Doe" match a
-/// roster row of "John Michael Doe" without matching an unrelated person.
+/// Whether the submitted name matches the roster name closely enough to be the
+/// same person.
+///
+/// The first and last name tokens must BOTH match, and any tokens the student
+/// typed in between must appear in the roster name in order — so an omitted
+/// middle name is fine, but a single token, an arbitrary subset, a reordered
+/// name, or a wrong surname is not. This is deliberately strict: verification is
+/// already weak identity evidence (a name plus a student id), and a looser rule
+/// would let a student id plus one common name token ("John", "Doe") claim the
+/// verified role for someone else.
 fn name_matches(roster: &str, submitted: &str) -> bool {
     let roster = normalise_name(roster);
     let submitted = normalise_name(submitted);
-    if submitted.is_empty() {
+
+    let roster_words: Vec<&str> = roster.split_whitespace().collect();
+    let submitted_words: Vec<&str> = submitted.split_whitespace().collect();
+
+    // A single token (or empty) is far too weak to identify a person, and a roster
+    // row without a distinct first and last name cannot be matched safely.
+    if submitted_words.len() < 2 || roster_words.len() < 2 {
         return false;
     }
-    if roster == submitted {
-        return true;
+
+    // The first and last name must both match.
+    if submitted_words.first() != roster_words.first()
+        || submitted_words.last() != roster_words.last()
+    {
+        return false;
     }
-    let roster_words: Vec<&str> = roster.split(' ').collect();
+
+    // Every token the student typed must appear in the roster name in order.
     let mut idx = 0usize;
-    for word in submitted.split(' ') {
-        match roster_words[idx..].iter().position(|w| *w == word) {
+    for &word in &submitted_words {
+        match roster_words[idx..].iter().position(|&w| w == word) {
             Some(offset) => idx += offset + 1,
             None => return false,
         }
@@ -386,9 +404,26 @@ mod tests {
     }
 
     #[test]
-    fn allows_a_missing_middle_name() {
+    fn verifies_full_name_and_omitted_middle() {
+        assert!(name_matches("John Michael Doe", "John Michael Doe"));
         assert!(name_matches("John Michael Doe", "John Doe"));
         assert!(name_matches("John Michael Doe", "john michael doe"));
+    }
+
+    #[test]
+    fn rejects_a_single_token() {
+        // A student id plus one common name token must never verify.
+        assert!(!name_matches("John Michael Doe", "John"));
+        assert!(!name_matches("John Michael Doe", "Doe"));
+        assert!(!name_matches("John Michael Doe", "Michael"));
+        assert!(!name_matches("John Doe", "John"));
+    }
+
+    #[test]
+    fn rejects_wrong_surname_or_first_name() {
+        assert!(!name_matches("John Michael Doe", "John Smith"));
+        assert!(!name_matches("John Michael Doe", "Jane Doe"));
+        assert!(!name_matches("John Doe", "Jack Doe"));
     }
 
     #[test]
