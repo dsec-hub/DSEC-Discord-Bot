@@ -1,6 +1,21 @@
 use crate::{Data, Error, commands::mods_only::log_embed};
 use poise::serenity_prelude as serenity;
 
+/// Effective permissions for `member` in `channel_id`, honouring per-channel
+/// permission overwrites. Returns `None` when the guild or the channel is not in
+/// cache — the caller must treat that as "permissions could not be established"
+/// and fail safe (do not ban), never as "no permissions".
+fn channel_permissions(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+    channel_id: serenity::ChannelId,
+    member: &serenity::Member,
+) -> Option<serenity::Permissions> {
+    let guild = ctx.cache.guild(guild_id)?;
+    let channel = guild.channels.get(&channel_id)?;
+    Some(guild.user_permissions_in(channel, member))
+}
+
 async fn honeypot(
     ctx: &serenity::Context,
     new_message: &serenity::Message,
@@ -20,23 +35,35 @@ async fn honeypot(
             return Ok(());
         }
 
-        // Never ban someone who can moderate. A moderator checking whether the
-        // honeypot works should not be the person it catches. This reads the
-        // cached guild; if it is unavailable we fall through and let the honeypot
-        // act, rather than skipping the check silently for everyone.
-        if let Some(guild_id) = new_message.guild_id
-            && let Ok(member) = guild_id.member(ctx, user.id).await
-        {
-            // Guild-level moderator identity is exactly what we want here; the
-            // deprecation is about per-channel permission overwrites, which are
-            // irrelevant to "can this person moderate at all".
-            #[allow(deprecated)]
-            let perms = member.permissions(ctx);
-            if let Ok(perms) = perms
-                && (perms.ban_members() || perms.manage_messages() || perms.administrator())
-            {
+        // Never ban someone who can moderate, and fail SAFE: whenever the author's
+        // identity or permissions cannot be established, abstain rather than ban.
+        // A honeypot that occasionally misses a spammer is far cheaper than one
+        // that bans a moderator or a legitimate member.
+        let Some(message_guild_id) = new_message.guild_id else {
+            eprintln!("[honeypot] message has no guild_id; abstaining from ban");
+            return Ok(());
+        };
+        let member = match message_guild_id.member(ctx, user.id).await {
+            Ok(member) => member,
+            Err(err) => {
+                eprintln!(
+                    "[honeypot] could not fetch member {} to check permissions; abstaining: {err}",
+                    user.id
+                );
                 return Ok(());
             }
+        };
+        // Effective permissions IN THE HONEYPOT CHANNEL (honouring overwrites).
+        let Some(perms) = channel_permissions(ctx, message_guild_id, *current_channel_id, &member)
+        else {
+            eprintln!(
+                "[honeypot] could not compute permissions for {} in {}; abstaining",
+                user.id, current_channel_id
+            );
+            return Ok(());
+        };
+        if perms.ban_members() || perms.manage_messages() || perms.administrator() {
+            return Ok(());
         }
 
         let username = &user.name;
