@@ -76,6 +76,34 @@ async fn honeypot(
     Ok(())
 }
 
+/// Discord rejects a thread name that is empty or over 100 characters, and the
+/// resulting 400 is invisible to the person who posted (no logging is set up —
+/// see OPS-04). So clamp here rather than letting the API reject it.
+const MAX_THREAD_NAME_CHARS: usize = 100;
+const DEFAULT_THREAD_NAME: &str = "LeetCode discussion";
+
+/// Derive a thread name from a LeetCode post.
+///
+/// Posts are conventionally numbered ("1. Two Sum"), so the leading two
+/// characters are dropped. A first line of two characters or fewer leaves
+/// nothing behind, and a very long one exceeds Discord's limit — both are
+/// handled here rather than at the API.
+fn create_title_from_message(message: &str) -> String {
+    let first = message.lines().next().unwrap_or("");
+    let start = first
+        .char_indices()
+        .nth(2)
+        .map(|(i, _)| i)
+        .unwrap_or(first.len());
+    let trimmed = first[start..].trim();
+
+    if trimmed.is_empty() {
+        return DEFAULT_THREAD_NAME.to_string();
+    }
+    // Truncate on a CHARACTER boundary — byte slicing would panic mid-emoji.
+    trimmed.chars().take(MAX_THREAD_NAME_CHARS).collect()
+}
+
 async fn create_leetcode_thread(
     ctx: &serenity::Context,
     new_message: &serenity::Message,
@@ -86,30 +114,18 @@ async fn create_leetcode_thread(
     let current_channel_id = &new_message.channel_id;
 
     if leetcode_channel_id.eq(current_channel_id) {
-        fn create_title_from_message(message: impl Into<String>) -> String {
-            let message_string: String = message.into();
-
-            message_string
-                .lines()
-                .next()
-                .map(|line| {
-                    let start = line
-                        .char_indices()
-                        .nth(2)
-                        .map(|(i, _)| i)
-                        .unwrap_or(line.len());
-                    &line[start..]
-                })
-                .unwrap_or("")
-                .to_string()
-        }
-
         let new_thread =
             serenity::CreateThread::new(create_title_from_message(&new_message.content));
-        current_channel_id
+        if let Err(err) = current_channel_id
             .create_thread_from_message(ctx, new_message.id, new_thread)
-            .await?;
-    };
+            .await
+        {
+            eprintln!(
+                "[leetcode] failed to create thread for message {}: {err}",
+                new_message.id
+            );
+        }
+    }
 
     Ok(())
 }
@@ -129,4 +145,49 @@ pub async fn on_message(
         eprintln!("[on_message] leetcode thread failed: {err}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_title_from_message;
+
+    #[test]
+    fn strips_the_numbering_prefix() {
+        assert_eq!(create_title_from_message("1. Two Sum"), "Two Sum");
+    }
+
+    #[test]
+    fn empty_message_falls_back_to_the_default() {
+        assert_eq!(create_title_from_message(""), "LeetCode discussion");
+    }
+
+    #[test]
+    fn two_character_line_falls_back_to_the_default() {
+        // "hi" has nothing left after the two-character prefix is dropped,
+        // and Discord rejects an empty thread name with a 400.
+        assert_eq!(create_title_from_message("hi"), "LeetCode discussion");
+    }
+
+    #[test]
+    fn long_line_is_clamped_to_the_discord_limit() {
+        let long = format!("1. {}", "a".repeat(200));
+        let got = create_title_from_message(&long);
+        assert_eq!(got.chars().count(), 100);
+    }
+
+    #[test]
+    fn multibyte_prefix_does_not_panic_and_truncates_on_a_char_boundary() {
+        // A leading emoji is two chars wide in some fonts but one char here;
+        // byte-slicing this would panic.
+        let got = create_title_from_message("🔥 Daily challenge: reverse a linked list");
+        assert!(!got.is_empty());
+    }
+
+    #[test]
+    fn only_the_first_line_is_used() {
+        assert_eq!(
+            create_title_from_message("1. Two Sum\nsome body text"),
+            "Two Sum"
+        );
+    }
 }
