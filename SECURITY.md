@@ -29,10 +29,12 @@ You need the Supabase project credentials for this. **Who holds them:** the club
 committee — ask in the committee Discord. (Historically the bot maintainer; TODO: name
 the current holder here.) Do **not** paste real credentials into a chat or a ticket.
 
-Find the link row(s) for a student id:
+Find the link row(s) for a student id. The bot stores the id as **digits only** (it
+strips the leading `s` and any punctuation before saving), so search the bare digits —
+`'123456789'`, not `'s123456789'`:
 
 ```sql
-select * from dsec_discord_members where student_id = 's123456789';
+select * from dsec_discord_members where student_id = '123456789';
 ```
 
 Delete a specific link by hand:
