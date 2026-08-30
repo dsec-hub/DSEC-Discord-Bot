@@ -13,7 +13,7 @@ pub struct StudentRow {
 #[name = "Club Verification"]
 pub struct VerificationModal {
     #[name = "Full Name"]
-    #[placeholder = "John Doe"]
+    #[placeholder = "As it appears on your DUSA membership"]
     #[max_length = 50]
     pub name: String,
     #[name = "Student ID"]

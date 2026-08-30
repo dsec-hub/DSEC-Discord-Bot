@@ -42,7 +42,50 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           sudo docker compose up -d --build --force-recreate
-          echo "Deployment complete."
+          echo "Container created."
+
+      # `docker compose up -d` exits 0 once the container is created, not once the
+      # program inside is working. And with `restart: unless-stopped` a container
+      # that panics at boot is restarted, so a crash loop still reads Running at any
+      # single instant — "Running" alone is not proof of a healthy deploy. Assert
+      # the bot actually reached READY (it logs "Logged in as ..." from the Ready
+      # handler) within a stability window AND has not restarted, and dump its logs
+      # and fail otherwise (OPS-04).
+      - name: Verify the bot came up cleanly
+        working-directory: ${{ github.workspace }}
+        run: |
+          id=$(sudo docker compose ps -q dsec_bot)
+          if [ -z "$id" ]; then
+            echo "::error::dsec_bot container was not created"
+            sudo docker compose logs --tail=200 dsec_bot || true
+            exit 1
+          fi
+
+          ready=""
+          for _ in $(seq 1 30); do
+            sleep 2
+            running=$(sudo docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null || echo "false")
+            restarts=$(sudo docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null || echo "0")
+            # A non-zero restart count means it has already crashed at least once:
+            # stop waiting and fail rather than let a later restart look healthy.
+            if [ "$restarts" != "0" ]; then
+              break
+            fi
+            if [ "$running" = "true" ] \
+               && sudo docker compose logs dsec_bot 2>&1 | grep -q "Logged in as"; then
+              ready="yes"
+              break
+            fi
+          done
+
+          running=$(sudo docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null || echo "false")
+          restarts=$(sudo docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null || echo "0")
+          if [ "$ready" != "yes" ] || [ "$running" != "true" ] || [ "$restarts" != "0" ]; then
+            echo "::error::dsec_bot did not come up cleanly (running=$running restarts=$restarts ready=${ready:-no})"
+            sudo docker compose logs --tail=200 dsec_bot
+            exit 1
+          fi
+          echo "Deployment complete: dsec_bot reached READY with no restarts."
 
       - name: Remove environment file
         if: always()

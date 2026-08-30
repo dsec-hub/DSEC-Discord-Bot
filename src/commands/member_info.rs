@@ -66,46 +66,42 @@ pub async fn member_info(ctx: ApplicationContext<'_>) -> Result<(), Error> {
 
     let user_data_option = member_data(&database, &student_id).await?;
 
-    if let Some(user_data) = user_data_option {
-        let member_name = user_data.full_name;
-        let member_campus = user_data.campus;
-        let membership_status = user_data.membership_status;
-        let expiry_date = user_data.end_date;
-
+    let Some(user_data) = user_data_option else {
         ctx.send(
             CreateReply::default()
-                .embed(
-                    CreateEmbed::new()
-                        .title("DSEC Membership Info")
-                        .description(format!(
-                            "
+                .embed(CreateEmbed::new().title("Couldn't find info").description(
+                    "Your membership may have expired. Contact a club executive to be sure.",
+                ))
+                // Ephemeral like the other two replies: whether someone's
+                // membership has lapsed is their business, not the channel's.
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let member_name = user_data.full_name;
+    let member_campus = user_data.campus;
+    let membership_status = user_data.membership_status;
+    let expiry_date = user_data.end_date;
+
+    ctx.send(
+        CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("DSEC Membership Info")
+                    .description(format!(
+                        "
                         **Name:** {member_name}
                         **Campus:** {member_campus}
                         **Membership Status:** {membership_status}
                         **Membership Expiry Date**: {expiry_date}
                         "
-                        )),
-                )
-                .ephemeral(true),
-        )
-        .await?;
-    } else {
-        ctx.send(CreateReply::default().embed(
-            CreateEmbed::new().title("Couldn't find info").description(
-                "Your membership may have expired. Contact a club executive to be sure.",
-            ),
-        ))
-        .await?;
-    }
-
-    // let student_data = state
-    //     .supabase
-    //     .database()
-    //     .from("active_members")
-    //     .select("full_name, student_id")
-    //     .eq("student_id", &student_id)
-    //     .execute()
-    //     .await?;
+                    )),
+            )
+            .ephemeral(true),
+    )
+    .await?;
 
     Ok(())
 }

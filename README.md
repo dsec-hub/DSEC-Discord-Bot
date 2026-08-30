@@ -59,6 +59,13 @@ docker-compose build
 docker-compose up
 ```
 
+## Logging
+
+The bot logs at `info` by default. Do **not** set `RUST_LOG` to `debug` or `trace`
+on the VPS or in the `DOT_ENV` secret: at `debug` the Supabase client logs the
+generated query URLs (which contain **student IDs**) and the service-account
+email. Adjust the level with `RUST_LOG` locally only (e.g. `RUST_LOG=warn`).
+
 ## Rules
 
 ### General Rules
