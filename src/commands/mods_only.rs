@@ -1,4 +1,4 @@
-use crate::{Context, Error, events::interaction_create::DiscordMemberRow};
+use crate::{Context, Error, events::interaction_create::DiscordMemberRow, redact_digits};
 use poise::{CreateReply, serenity_prelude as serenity};
 
 /// Send message to logs channel
@@ -148,27 +148,92 @@ pub async fn embed(
 /// row is already gone, so the reply and the log both flag that a human must strip
 /// the role by hand. A member-facing `/unverify` is deliberately NOT provided: a
 /// self-service unlink would let a hijacker cover their tracks.
-#[poise::command(slash_command, required_permissions = "MANAGE_ROLES")]
+///
+/// AuthZ note: the `MANAGE_ROLES` gate is for command visibility only and is NOT
+/// trusted for authorization — poise 0.6 treats a DM invoker as `Permissions::all()`,
+/// so the gate passes in a DM. The command is `guild_only` and, before any database
+/// work, asserts it is running in the DSEC guild specifically, which also stops a
+/// moderator of some *other* guild the bot is in from deleting DSEC rows (SEC-19 #1).
+#[poise::command(slash_command, guild_only, required_permissions = "MANAGE_ROLES")]
 pub async fn unlink(
     ctx: Context<'_>,
     #[description = "The member whose verification link should be removed"] user: serenity::User,
 ) -> Result<(), Error> {
     let state = &ctx.data().state;
+
+    // AuthZ, before anything else and before any DB op: must be the DSEC guild.
+    if ctx.guild_id() != Some(state.guild_id) {
+        ctx.send(
+            CreateReply::default()
+                .embed(
+                    serenity::CreateEmbed::new()
+                        .title("Unavailable here")
+                        .description("This command can only be used in the DSEC server."),
+                )
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Acknowledge within Discord's ~3s window before any DB/HTTP work, so a mutation
+    // can never happen without an ack and every reply below edits this deferred
+    // response (SEC-19 #7).
+    ctx.defer_ephemeral().await?;
+
     let user_id = user.id.to_string();
+    let moderator = ctx.author();
 
     // 1. Delete the link row FIRST. `.returning(...)` is required: without it
     //    PostgREST answers a DELETE with an empty 204 body that fails to deserialise
     //    (the COR-03 gotcha), and the returned rows also tell us whether a link
-    //    actually existed. If this errors we stop before touching the role, so we
-    //    never leave the member un-roled but still linked.
-    let deleted: Vec<DiscordMemberRow> = state
+    //    actually existed. Handle a delete error HERE (do not let `?` skip the
+    //    moderator reply and the audit): a raw supabase error also leaks the target
+    //    id, so it is redacted before printing and never shown to the user (SEC-19 #9).
+    let deleted = match state
         .supabase
         .database()
         .delete("dsec_discord_members")
         .eq("discord_id", &user_id)
         .returning("student_id,discord_id")
-        .execute()
-        .await?;
+        .execute::<DiscordMemberRow>()
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!(
+                "[unlink] delete failed for target {}: {}",
+                user.id,
+                redact_digits(&err.to_string())
+            );
+            let _ = ctx
+                .send(
+                    CreateReply::default()
+                        .embed(serenity::CreateEmbed::new().title("Unlink failed").description(
+                            "Could not remove the link row (database error). Nothing was changed. Try again, or remove it by hand — see SECURITY.md.",
+                        ))
+                        .ephemeral(true),
+                )
+                .await;
+            let _ = log_embed(
+                ctx.serenity_context(),
+                state.logs_channel_id,
+                Some("Unlink FAILED (database error)".to_string()),
+                None,
+                Some(format!(
+                    "Moderator <@{}> (id `{}`) ran /unlink on <@{}> (id `{}`), but deleting the link row failed. No changes made.",
+                    moderator.id, moderator.id, user.id, user.id
+                )),
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+            )
+            .await;
+            return Ok(());
+        }
+    };
     let had_link = !deleted.is_empty();
 
     // 2. Then remove the verified role. Report clearly if THIS half fails so a human
@@ -176,18 +241,18 @@ pub async fn unlink(
     let role_id = state.verified_role_id;
     let mut role_removed = false;
     let mut role_error: Option<String> = None;
-    match ctx.guild_id() {
-        Some(guild_id) => match guild_id.member(ctx.serenity_context(), user.id).await {
-            Ok(member) => match member.remove_role(ctx.serenity_context(), role_id).await {
-                Ok(()) => role_removed = true,
-                Err(err) => role_error = Some(err.to_string()),
-            },
+    // We already asserted this is the DSEC guild, so operate on it directly. Role
+    // errors are Discord API errors (no student id), so they are safe to show the mod.
+    match state.guild_id.member(ctx.serenity_context(), user.id).await {
+        Ok(member) => match member.remove_role(ctx.serenity_context(), role_id).await {
+            Ok(()) => role_removed = true,
             Err(err) => role_error = Some(err.to_string()),
         },
-        None => role_error = Some("command was not run in a guild".to_string()),
+        Err(err) => role_error = Some(err.to_string()),
     }
 
-    // Ephemeral report to the moderator.
+    // Ephemeral report to the moderator (edits the deferred response). Best-effort so a
+    // failed reply cannot skip the audit log below (SEC-19 #7).
     let mut summary = if had_link {
         String::from("Deleted the verification link row.\n")
     } else {
@@ -202,16 +267,17 @@ pub async fn unlink(
         ));
     }
 
-    ctx.send(
-        CreateReply::default()
-            .embed(serenity::CreateEmbed::new().title("Unlink").description(summary))
-            .ephemeral(true),
-    )
-    .await?;
+    let _ = ctx
+        .send(
+            CreateReply::default()
+                .embed(serenity::CreateEmbed::new().title("Unlink").description(summary))
+                .ephemeral(true),
+        )
+        .await;
 
-    // Log to the logs channel, naming the moderator who ran the command.
-    let moderator = ctx.author();
-    log_embed(
+    // Audit to the logs channel, naming the moderator — runs regardless of whether the
+    // reply above succeeded.
+    let _ = log_embed(
         ctx.serenity_context(),
         state.logs_channel_id,
         Some("Verification link removed (/unlink)".to_string()),
@@ -235,7 +301,7 @@ pub async fn unlink(
         None,
         Some(true),
     )
-    .await?;
+    .await;
 
     Ok(())
 }
