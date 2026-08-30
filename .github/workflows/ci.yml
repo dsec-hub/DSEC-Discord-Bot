@@ -1,0 +1,82 @@
+# Format, lint, build and test on every pull request.
+#
+# This must run on a GitHub-hosted runner and never on the club VPS. The runner
+# deploy.yml uses lives on the club's own server and executes whatever a workflow
+# tells it to, as root, so nothing triggered by a pull request may be pointed at
+# it. Read that as a rule for this file, not a property of the repository: this
+# repo is public, forking is on, and fork pull requests only need approval from a
+# first-time contributor, so a fork that brings its own workflow can still reach
+# that runner. See SEC-01.
+#
+# SEC-01: point the protect-main ruleset's required status check at this job's
+# name ("fmt / clippy / build / test") so a red build blocks the merge that
+# deploys.
+
+name: CI
+
+on:
+  pull_request:
+
+# A newer push to the same pull request makes an in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt / clippy / build / test
+    runs-on: ubuntu-latest
+    # A cold build of this dependency tree (serenity, reqwest, image, exr) in
+    # release, then clippy, then test, is slow on a 4-vCPU hosted runner. This is
+    # a guard against a hung job, not a target.
+    timeout-minutes: 45
+
+    steps:
+      # Third-party and first-party actions alike are pinned to a full commit
+      # SHA: a tag is mutable and can be repointed at new code by whoever owns
+      # the action.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Caches written by a pull_request run are scoped to that pull request, so
+      # this pays off across pushes to the same branch rather than across branches.
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # actions/runner-images documents rustfmt for ubuntu-24.04 but not clippy (it
+      # lists clippy only under ubuntu-22.04), while the image actually in use does
+      # ship it. Adding both components is a no-op when they are present and keeps
+      # this job working if that undocumented extra ever goes away. Print the
+      # versions too: clippy's lint set moves between releases, so knowing which one
+      # ran is what explains a lint that appeared from nowhere.
+      - name: Toolchain
+        run: |
+          rustup component add clippy rustfmt
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Kept ahead of clippy and test: those resolve dependencies and would
+      # refresh Cargo.lock in place, so a stale lockfile would slip past
+      # --locked if they ran first.
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

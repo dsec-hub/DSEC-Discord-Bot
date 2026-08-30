@@ -65,7 +65,7 @@ async fn create_leetcode_thread(
         fn create_title_from_message(message: impl Into<String>) -> String {
             let message_string: String = message.into();
 
-            let title = message_string
+            message_string
                 .lines()
                 .next()
                 .map(|line| {
@@ -77,8 +77,7 @@ async fn create_leetcode_thread(
                     &line[start..]
                 })
                 .unwrap_or("")
-                .to_string();
-            title
+                .to_string()
         }
 
         let new_thread =
@@ -95,7 +94,7 @@ pub async fn on_message(
     ctx: &serenity::Context,
     new_message: &serenity::Message,
 ) -> Result<(), Error> {
-    let _ = honeypot(ctx, new_message).await?;
-    let _ = create_leetcode_thread(ctx, new_message).await?;
+    honeypot(ctx, new_message).await?;
+    create_leetcode_thread(ctx, new_message).await?;
     Ok(())
 }

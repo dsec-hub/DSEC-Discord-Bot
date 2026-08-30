@@ -115,7 +115,7 @@ async fn grant_verified_role(
     data: &Data,
     modal_submit: &ModalInteraction,
     discord_member: &Member,
-    student_id: &String,
+    student_id: &str,
     verified_role_id: RoleId,
     via_cache: bool,
 ) -> Result<(), Error> {
@@ -170,7 +170,7 @@ async fn fetch_student(data: &Data, student_id: &str) -> Result<Option<StudentRo
     Ok(student_data.into_iter().next())
 }
 
-async fn member_recorded(data: &Data, user_id: &String) -> Result<bool, Error> {
+async fn member_recorded(data: &Data, user_id: &str) -> Result<bool, Error> {
     let rows: Vec<serde_json::Value> = data
         .state
         .supabase
@@ -210,18 +210,18 @@ async fn handle_verify(
     // already attached to the button interaction. Anything slower than this
     // (a DB query, a member fetch) must NOT run before the modal is shown, or
     // Discord's ~3s acknowledgement window elapses and the click fails.
-    if let Some(member) = &component_interaction.member {
-        if member.roles.contains(&verified_role_id) {
-            component_interaction
-                .create_response(
-                    ctx,
-                    ephemeral_embed(CreateEmbed::new().title("Already Verified ✅").description(
-                        format!("You already have the <@&{}> role!", verified_role_id),
-                    )),
-                )
-                .await?;
-            return Ok(());
-        }
+    if let Some(member) = &component_interaction.member
+        && member.roles.contains(&verified_role_id)
+    {
+        component_interaction
+            .create_response(
+                ctx,
+                ephemeral_embed(CreateEmbed::new().title("Already Verified ✅").description(
+                    format!("You already have the <@&{}> role!", verified_role_id),
+                )),
+            )
+            .await?;
+        return Ok(());
     }
 
     // Respond to the click with the modal immediately.
@@ -247,7 +247,7 @@ async fn handle_verify(
             data,
             &modal_submit,
             &discord_member,
-            &student_id.to_string(),
+            student_id,
             verified_role_id,
             true,
         )
@@ -277,7 +277,7 @@ async fn handle_verify(
             data,
             &modal_submit,
             &discord_member,
-            &student_id.to_string(),
+            student_id,
             verified_role_id,
             false,
         )

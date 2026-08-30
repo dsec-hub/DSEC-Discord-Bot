@@ -1,8 +1,11 @@
 use crate::{Context, Error};
 use dotenv::dotenv;
-use poise::{serenity_prelude as serenity, CreateReply};
+use poise::{CreateReply, serenity_prelude as serenity};
 
 /// Send message to logs channel
+// Each argument is one optional embed field; collapsing them into a struct would
+// change this function's signature and every call site, which this PR does not do.
+#[allow(clippy::too_many_arguments)]
 pub async fn log_embed(
     ctx: &serenity::Context,
     title: Option<String>,
@@ -36,10 +39,10 @@ pub async fn log_embed(
     }
 
     // Set color (parse hex color)
-    if let Some(color_str) = colour {
-        if let Ok(color_value) = u32::from_str_radix(color_str.trim_start_matches('#'), 16) {
-            embed = embed.color(color_value);
-        }
+    if let Some(color_str) = colour
+        && let Ok(color_value) = u32::from_str_radix(color_str.trim_start_matches('#'), 16)
+    {
+        embed = embed.color(color_value);
     }
 
     // Set thumbnail
@@ -77,6 +80,9 @@ pub async fn log_embed(
     slash_command,
     required_permissions = "MANAGE_MESSAGES | MANAGE_THREADS"
 )]
+// These arguments are the slash command's options as Discord presents them;
+// bundling them into a struct would change the command's public interface.
+#[allow(clippy::too_many_arguments)]
 pub async fn embed(
     ctx: Context<'_>,
     #[description = "Title of embed"] title: Option<String>,
@@ -109,10 +115,10 @@ pub async fn embed(
     }
 
     // Set color (parse hex color)
-    if let Some(color_str) = colour {
-        if let Ok(color_value) = u32::from_str_radix(color_str.trim_start_matches('#'), 16) {
-            embed = embed.color(color_value);
-        }
+    if let Some(color_str) = colour
+        && let Ok(color_value) = u32::from_str_radix(color_str.trim_start_matches('#'), 16)
+    {
+        embed = embed.color(color_value);
     }
 
     // Set thumbnail

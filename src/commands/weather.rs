@@ -26,24 +26,24 @@ pub async fn weather(
     let weather_response = get_weather(location).await?;
     let value: Value = serde_json::from_str(&weather_response)?;
 
-    let location_name = (&value["location"]["name"]).as_str().unwrap();
-    let location_region = (&value["location"]["region"]).as_str().unwrap();
-    let location_country = (&value["location"]["country"]).as_str().unwrap();
+    let location_name = value["location"]["name"].as_str().unwrap();
+    let location_region = value["location"]["region"].as_str().unwrap();
+    let location_country = value["location"]["country"].as_str().unwrap();
 
-    let weather_condition = (&value["current"]["condition"]["text"]).as_str().unwrap();
+    let weather_condition = value["current"]["condition"]["text"].as_str().unwrap();
     let weather_temp = &value["current"]["temp_c"];
     let weather_feels_like = &value["current"]["feelslike_c"];
     let weather_wind_kph = &value["current"]["wind_kph"];
     let weather_humidity = &value["current"]["humidity"];
     let weather_cloud = &value["current"]["cloud"];
 
-    let weather_icon = (&value["current"]["condition"]["icon"]).as_str().unwrap();
+    let weather_icon = value["current"]["condition"]["icon"].as_str().unwrap();
 
     let embed = CreateEmbed::new()
-        .field("Name", format!("{}", location_name), true)
-        .field("Region", format!("{}", location_region), true)
-        .field("Country", format!("{}", location_country), true)
-        .field("Condition", format!("{}", weather_condition), true)
+        .field("Name", location_name.to_string(), true)
+        .field("Region", location_region.to_string(), true)
+        .field("Country", location_country.to_string(), true)
+        .field("Condition", weather_condition.to_string(), true)
         .field("Temperature", format!("{} °C", weather_temp), true)
         .field("Feels like", format!("{} °C", weather_feels_like), true)
         .field("Wind", format!("{} kph", weather_wind_kph), true)
