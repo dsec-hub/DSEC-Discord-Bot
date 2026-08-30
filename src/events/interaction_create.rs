@@ -86,12 +86,18 @@ async fn add_dsec_discord_table(
         "discord_id": member_id,
     });
 
+    // `.returning(...)` makes supabase-lib-rs send `Prefer: return=representation`.
+    // Without it PostgREST defaults a POST to `return=minimal` — a 201 with an
+    // empty body — and deserialising that empty body into Vec<DiscordMemberRow>
+    // failed, aborting before the role grant even though the row was written.
+    // That is why verification failed on every member's first attempt (COR-03).
     let _: Vec<DiscordMemberRow> = data
         .state
         .supabase
         .database()
         .insert("dsec_discord_members")
         .values(new_member)?
+        .returning("student_id,discord_id")
         .execute()
         .await?;
 
@@ -220,66 +226,93 @@ async fn handle_verify(
         return Ok(());
     };
 
-    // From here on we hold the modal-submit token, so the slower member fetch
-    // and database work below is no longer racing the button's ack window.
+    // From here on we hold the modal-submit token, so the slower member fetch and
+    // database work below is no longer racing the button's ack window. Wrap that
+    // work so any failure (e.g. a database error) still sends the user an
+    // ephemeral message rather than leaving a dead "This interaction failed"
+    // interaction — poise's on_error cannot reach this modal submission (COR-03).
     let user_id = component_interaction.user.id;
-    let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
 
-    let input_student_id = modal_data.student_id.to_lowercase();
-    let student_id = input_student_id
-        .strip_prefix("s")
-        .unwrap_or(&input_student_id);
+    let verify_result: Result<(), Error> = async {
+        let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
 
-    if cached_name_matches(data, student_id, &modal_data.name) {
-        grant_verified_role(
-            ctx,
-            data,
-            &modal_submit,
-            &discord_member,
-            student_id,
-            verified_role_id,
-            true,
-        )
-        .await?;
-        return Ok(());
+        let input_student_id = modal_data.student_id.to_lowercase();
+        let student_id = input_student_id
+            .strip_prefix("s")
+            .unwrap_or(&input_student_id);
+
+        if cached_name_matches(data, student_id, &modal_data.name) {
+            grant_verified_role(
+                ctx,
+                data,
+                &modal_submit,
+                &discord_member,
+                student_id,
+                verified_role_id,
+                true,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let Some(student) = fetch_student(data, student_id).await? else {
+            modal_submit
+                .create_response(
+                    ctx,
+                    ephemeral_embed(
+                        CreateEmbed::new().title("Student ID not found!").description(
+                            "Your student ID is not found.\nIt takes up to **a week** for your membership to be updated in the database since sign up.\nTry again later.",
+                        ),
+                    ),
+                )
+                .await?;
+            return Ok(());
+        };
+
+        cache_student(data, student_id, &student.full_name);
+
+        if student.full_name.to_lowercase() == modal_data.name.to_lowercase() {
+            grant_verified_role(
+                ctx,
+                data,
+                &modal_submit,
+                &discord_member,
+                student_id,
+                verified_role_id,
+                false,
+            )
+            .await?;
+        } else {
+            modal_submit
+                .create_response(
+                    ctx,
+                    ephemeral_embed(CreateEmbed::new().title("Name mismatch ❌").description(
+                        "Your student ID is present, however the name does not match. Try again.",
+                    )),
+                )
+                .await?;
+        }
+
+        Ok(())
     }
+    .await;
 
-    let Some(student) = fetch_student(data, student_id).await? else {
-        modal_submit
+    if let Err(err) = verify_result {
+        eprintln!("[verify] verification failed after modal submit: {err}");
+        // Best-effort ephemeral error so the user does not see the generic
+        // "This interaction failed" with no way forward.
+        let _ = modal_submit
             .create_response(
                 ctx,
                 ephemeral_embed(
-                    CreateEmbed::new().title("Student ID not found!").description(
-                        "Your student ID is not found.\nIt takes up to **a week** for your membership to be updated in the database since sign up.\nTry again later.",
-                    ),
+                    CreateEmbed::new()
+                        .title("Something went wrong")
+                        .description(
+                            "A maintainer has been notified. Please try again in a minute.",
+                        ),
                 ),
             )
-            .await?;
-        return Ok(());
-    };
-
-    cache_student(data, student_id, &student.full_name);
-
-    if student.full_name.to_lowercase() == modal_data.name.to_lowercase() {
-        grant_verified_role(
-            ctx,
-            data,
-            &modal_submit,
-            &discord_member,
-            student_id,
-            verified_role_id,
-            false,
-        )
-        .await?;
-    } else {
-        modal_submit
-            .create_response(
-                ctx,
-                ephemeral_embed(CreateEmbed::new().title("Name mismatch ❌").description(
-                    "Your student ID is present, however the name does not match. Try again.",
-                )),
-            )
-            .await?;
+            .await;
     }
 
     Ok(())
