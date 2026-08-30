@@ -27,8 +27,9 @@ pub struct AppState {
     pub verified_role_id: serenity::RoleId,
     pub logs_channel_id: serenity::ChannelId,
     // Optional: only /weather uses it. Read once here so no handler re-reads the
-    // process environment, but a missing value must not stop the bot from booting.
-    pub weather_token: String,
+    // process environment; `None` (missing or blank) simply disables /weather
+    // rather than stopping the bot from booting.
+    pub weather_token: Option<String>,
 }
 
 /// Read a required `u64` snowflake from the environment, recording the variable
@@ -67,8 +68,11 @@ impl AppState {
             std::process::exit(1);
         }
 
-        // Non-fatal: the bot boots without a weather key, /weather just fails.
-        let weather_token = std::env::var("WEATHER_TOKEN").unwrap_or_default();
+        // Non-fatal: the bot boots without a weather key; a missing or blank
+        // value becomes None and disables /weather rather than failing.
+        let weather_token = std::env::var("WEATHER_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty());
 
         let supabase_url = std::env::var("SUPABASE_URL").expect("missing SUPABASE_URL");
         let supabase_key = std::env::var("SUPABASE_KEY").expect("missing SUPABASE_KEY");
