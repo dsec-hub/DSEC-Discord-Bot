@@ -1,4 +1,4 @@
-use crate::{Context, Error};
+use crate::{Context, Error, events::interaction_create::DiscordMemberRow};
 use poise::{CreateReply, serenity_prelude as serenity};
 
 /// Send message to logs channel
@@ -135,6 +135,107 @@ pub async fn embed(
 
     // Send the embed
     ctx.send(CreateReply::default().embed(embed)).await?;
+
+    Ok(())
+}
+
+/// Remove a member's verification link (COL-BOT-01).
+///
+/// This is the moderator-gated undo for a hijacked verification. It deletes the
+/// `dsec_discord_members` row FIRST and only then strips the verified role, because
+/// the reverse order can leave a member un-roled but still linked — the exact state
+/// that permanently breaks `/member_info` for them. If the role removal fails the
+/// row is already gone, so the reply and the log both flag that a human must strip
+/// the role by hand. A member-facing `/unverify` is deliberately NOT provided: a
+/// self-service unlink would let a hijacker cover their tracks.
+#[poise::command(slash_command, required_permissions = "MANAGE_ROLES")]
+pub async fn unlink(
+    ctx: Context<'_>,
+    #[description = "The member whose verification link should be removed"] user: serenity::User,
+) -> Result<(), Error> {
+    let state = &ctx.data().state;
+    let user_id = user.id.to_string();
+
+    // 1. Delete the link row FIRST. `.returning(...)` is required: without it
+    //    PostgREST answers a DELETE with an empty 204 body that fails to deserialise
+    //    (the COR-03 gotcha), and the returned rows also tell us whether a link
+    //    actually existed. If this errors we stop before touching the role, so we
+    //    never leave the member un-roled but still linked.
+    let deleted: Vec<DiscordMemberRow> = state
+        .supabase
+        .database()
+        .delete("dsec_discord_members")
+        .eq("discord_id", &user_id)
+        .returning("student_id,discord_id")
+        .execute()
+        .await?;
+    let had_link = !deleted.is_empty();
+
+    // 2. Then remove the verified role. Report clearly if THIS half fails so a human
+    //    can finish it — the row is already gone, so nothing else is inconsistent.
+    let role_id = state.verified_role_id;
+    let mut role_removed = false;
+    let mut role_error: Option<String> = None;
+    match ctx.guild_id() {
+        Some(guild_id) => match guild_id.member(ctx.serenity_context(), user.id).await {
+            Ok(member) => match member.remove_role(ctx.serenity_context(), role_id).await {
+                Ok(()) => role_removed = true,
+                Err(err) => role_error = Some(err.to_string()),
+            },
+            Err(err) => role_error = Some(err.to_string()),
+        },
+        None => role_error = Some("command was not run in a guild".to_string()),
+    }
+
+    // Ephemeral report to the moderator.
+    let mut summary = if had_link {
+        String::from("Deleted the verification link row.\n")
+    } else {
+        String::from("No verification link row existed (nothing to delete).\n")
+    };
+    if role_removed {
+        summary.push_str("Removed the verified role.");
+    } else {
+        summary.push_str(&format!(
+            "⚠️ Could NOT remove the verified role — a human must remove <@&{role_id}> from <@{user_id}> by hand. Reason: {}.",
+            role_error.as_deref().unwrap_or("unknown error")
+        ));
+    }
+
+    ctx.send(
+        CreateReply::default()
+            .embed(serenity::CreateEmbed::new().title("Unlink").description(summary))
+            .ephemeral(true),
+    )
+    .await?;
+
+    // Log to the logs channel, naming the moderator who ran the command.
+    let moderator = ctx.author();
+    log_embed(
+        ctx.serenity_context(),
+        state.logs_channel_id,
+        Some("Verification link removed (/unlink)".to_string()),
+        None,
+        Some(format!(
+            "Moderator <@{}> (id `{}`) ran /unlink on <@{}> (id `{}`). Link row: {}. Verified role: {}.",
+            moderator.id,
+            moderator.id,
+            user.id,
+            user.id,
+            if had_link { "deleted" } else { "none found" },
+            if role_removed {
+                "removed"
+            } else {
+                "NOT removed — needs manual follow-up"
+            },
+        )),
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+    )
+    .await?;
 
     Ok(())
 }

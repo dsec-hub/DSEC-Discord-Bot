@@ -193,6 +193,7 @@ async fn main() {
                 commands::weather::weather(),
                 commands::verification::verify(),
                 commands::mods_only::embed(),
+                commands::mods_only::unlink(),
                 commands::member_info::member_info(),
             ],
             event_handler: |ctx, event, framework, data| {
