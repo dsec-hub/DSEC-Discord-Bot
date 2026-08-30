@@ -1,9 +1,62 @@
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use supabase::prelude::Client;
 mod commands;
 mod events;
+
+/// Mask any "numeric token" that contains 7+ ASCII digits, so student ids (9 digits)
+/// and Discord snowflakes (17-19 digits) never reach a log line. A numeric token is a
+/// run of digits optionally joined by single interior separators (`-` `.` `_`), so a
+/// punctuated id — `123-456-789`, `123.456.789` — is masked as one unit, not left half
+/// visible (SEC-19 #4). Supabase/reqwest error text embeds the PostgREST URL
+/// (`…student_id=eq.<id>`) and a `23505` body echoes the id in a `Key (…)=(…)` detail,
+/// so any error printed on a request path must pass through here first. The 7-digit
+/// floor keeps short diagnostic codes (SQLSTATE like `23505`, HTTP status, `v1.2.3`)
+/// intact. Submitted student ids are already reduced to pure digits before any query,
+/// so this is defence in depth; names never appear on these error paths, and
+/// correlation ids are printed separately, never through this function.
+pub(crate) fn redact_digits(input: &str) -> String {
+    const MIN_DIGITS: usize = 7;
+    const CONNECTORS: [char; 3] = ['-', '.', '_'];
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        // Consume a numeric token: digits, plus a separator only when it sits directly
+        // between two digits.
+        let start = i;
+        let mut digit_count = 0usize;
+        while i < chars.len() {
+            if chars[i].is_ascii_digit() {
+                digit_count += 1;
+                i += 1;
+            } else if CONNECTORS.contains(&chars[i])
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+            {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if digit_count >= MIN_DIGITS {
+            out.push_str("<redacted>");
+        } else {
+            out.extend(&chars[start..i]);
+        }
+    }
+    out
+}
 
 #[derive(Debug)]
 pub struct Data {
@@ -18,7 +71,21 @@ type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
 #[derive(Debug)]
 pub struct AppState {
     pub supabase: Client,
-    pub student_cache: Mutex<HashMap<String, String>>,
+    // SEC-19: per-Discord-user failed-verification counter. `(failures, window_start)`
+    // keyed by user id; once `failures` hits the limit inside the window the verify
+    // handler refuses the attempt with no database round trip. The old
+    // `student_cache` was removed: it was consulted *before* the only query carrying
+    // the `membership_status = "Active"` filter, had no TTL and was never evicted, so
+    // in a long-lived container it was a stale-membership bypass. One query per verify
+    // is not a performance problem.
+    pub verify_attempts: Mutex<HashMap<serenity::UserId, (u32, Instant)>>,
+    // SEC-19: one async lock per Discord user, held across a whole verification
+    // attempt so concurrent modal submits from the same user serialize and cannot each
+    // slip under the attempt limit / uniqueness checks. A tokio Mutex (not std) because
+    // the guard is held across awaits; the std Mutex here only guards the brief
+    // get-or-insert of the map and is never held across an await. Idle entries are
+    // pruned on access so the map cannot grow without bound.
+    pub verify_locks: Mutex<HashMap<serenity::UserId, Arc<tokio::sync::Mutex<()>>>>,
     // Parsed once at boot. Re-reading these per event means a config typo takes
     // down a handler at some random future moment instead of failing the deploy.
     pub guild_id: serenity::GuildId,
@@ -98,7 +165,8 @@ impl AppState {
 
         Ok(Self {
             supabase: client,
-            student_cache: Mutex::new(HashMap::new()),
+            verify_attempts: Mutex::new(HashMap::new()),
+            verify_locks: Mutex::new(HashMap::new()),
             guild_id: serenity::GuildId::new(guild_id),
             honeypot_channel_id: serenity::ChannelId::new(honeypot_channel_id),
             leetcode_channel_id: serenity::ChannelId::new(leetcode_channel_id),
@@ -136,33 +204,54 @@ async fn event_handler(
 /// too, but nothing surfaces it (no tracing subscriber, no log shipping — OPS-04),
 /// so an explicit handler is set (COR-03).
 async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
-    if let poise::FrameworkError::Command { ctx, .. } = &error {
-        let _ = ctx
-            .send(
-                poise::CreateReply::default()
-                    .content(
-                        "Something went wrong — a maintainer has been notified. Please try again in a minute.",
-                    )
-                    .ephemeral(true),
-            )
-            .await;
-    }
-    if let Err(e) = poise::builtins::on_error(error).await {
-        eprintln!("[on_error] failed while handling a framework error: {e}");
+    match error {
+        poise::FrameworkError::Command { ctx, error, .. } => {
+            // Print a redacted line ourselves and reply with a fixed generic ephemeral.
+            // We deliberately do NOT forward this to `poise::builtins::on_error`: its
+            // `Command` arm does a non-ephemeral `ctx.say(raw_error)`, which would leak
+            // Supabase/DB error text (including student ids) into the channel (SEC-19).
+            eprintln!(
+                "[on_error] command '{}' failed: {}",
+                ctx.command().name,
+                redact_digits(&error.to_string())
+            );
+            let _ = ctx
+                .send(
+                    poise::CreateReply::default()
+                        .content(
+                            "Something went wrong — a maintainer has been notified. Please try again in a minute.",
+                        )
+                        .ephemeral(true),
+                )
+                .await;
+        }
+        other => {
+            if let Err(e) = poise::builtins::on_error(other).await {
+                eprintln!("[on_error] failed while handling a framework error: {e}");
+            }
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    // Initialise logging first, before anything can log. Default to `info`:
-    // supabase-lib-rs logs generated query URLs (containing student IDs) and the
-    // service-account email at `debug`, so RUST_LOG must never be set to debug or
-    // trace on the VPS. See OPS-04 and the README.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // Initialise logging first, before anything can log. Default to `info`, then floor
+    // the supabase crate at `info` *regardless of RUST_LOG*. supabase-lib-rs logs the
+    // generated query URL — `…student_id=eq.<id>` — and the service-account email via
+    // `tracing::debug!` (its target is `supabase`, its [lib] name). That bypasses our
+    // own `redact_digits`, so an operator setting `RUST_LOG=debug` to debug something
+    // else would leak student ids. `add_directive` replaces any same-target directive
+    // parsed from RUST_LOG, so this wins over `RUST_LOG=debug` and even an explicit
+    // `RUST_LOG=supabase=debug` (only a hyper-specific `supabase::database=debug` could
+    // override it). Our own modules keep their normal level. See OPS-04 and the README.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        .add_directive(
+            "supabase=info"
+                .parse()
+                .expect("static tracing directive `supabase=info` is valid"),
+        );
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     dotenv().ok(); // load env
 
@@ -186,6 +275,7 @@ async fn main() {
                 commands::weather::weather(),
                 commands::verification::verify(),
                 commands::mods_only::embed(),
+                commands::mods_only::unlink(),
                 commands::member_info::member_info(),
             ],
             event_handler: |ctx, event, framework, data| {
