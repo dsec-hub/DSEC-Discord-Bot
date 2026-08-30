@@ -22,8 +22,15 @@ pub struct VerificationModal {
 }
 
 /// Embed message with verify button to verify membership
+///
+/// `guild_only`: the verify button drives a handler that mutates live PII and grants
+/// the DSEC role, so the button must never be posted into a DM. The handler itself
+/// additionally asserts it is running in the configured DSEC guild before any query
+/// (SEC-19 merge-blocker) — a foreign guild's copy of this button reaches Supabase
+/// through nothing.
 #[poise::command(
     slash_command,
+    guild_only,
     required_permissions = "MANAGE_MESSAGES | MANAGE_THREADS"
 )]
 pub async fn verify(ctx: ApplicationContext<'_>) -> Result<(), Error> {

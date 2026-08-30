@@ -9,35 +9,51 @@ use supabase::prelude::Client;
 mod commands;
 mod events;
 
-/// Mask any maximal run of 7+ ASCII digits so student ids (9 digits) and Discord
-/// snowflakes (17-19 digits) never reach a log line. Supabase/reqwest error text
-/// embeds the PostgREST URL (`…student_id=eq.<id>`) and a `23505` body echoes the id
-/// in a `Key (…)=(…)` detail, so any error printed on a request path must be redacted
-/// first (SEC-19). The 7-digit floor keeps short diagnostic codes (SQLSTATE like
-/// `23505`, HTTP status) intact while masking every id length we actually hold. Names
-/// never appear on these error paths (the failing queries filter by id only), and
+/// Mask any "numeric token" that contains 7+ ASCII digits, so student ids (9 digits)
+/// and Discord snowflakes (17-19 digits) never reach a log line. A numeric token is a
+/// run of digits optionally joined by single interior separators (`-` `.` `_`), so a
+/// punctuated id — `123-456-789`, `123.456.789` — is masked as one unit, not left half
+/// visible (SEC-19 #4). Supabase/reqwest error text embeds the PostgREST URL
+/// (`…student_id=eq.<id>`) and a `23505` body echoes the id in a `Key (…)=(…)` detail,
+/// so any error printed on a request path must pass through here first. The 7-digit
+/// floor keeps short diagnostic codes (SQLSTATE like `23505`, HTTP status, `v1.2.3`)
+/// intact. Submitted student ids are already reduced to pure digits before any query,
+/// so this is defence in depth; names never appear on these error paths, and
 /// correlation ids are printed separately, never through this function.
 pub(crate) fn redact_digits(input: &str) -> String {
-    const MIN_REDACTED_RUN: usize = 7;
+    const MIN_DIGITS: usize = 7;
+    const CONNECTORS: [char; 3] = ['-', '.', '_'];
+    let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(input.len());
-    let mut digits = String::new();
-    for ch in input.chars() {
-        if ch.is_ascii_digit() {
-            digits.push(ch);
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_digit() {
+            out.push(chars[i]);
+            i += 1;
             continue;
         }
-        if digits.len() >= MIN_REDACTED_RUN {
+        // Consume a numeric token: digits, plus a separator only when it sits directly
+        // between two digits.
+        let start = i;
+        let mut digit_count = 0usize;
+        while i < chars.len() {
+            if chars[i].is_ascii_digit() {
+                digit_count += 1;
+                i += 1;
+            } else if CONNECTORS.contains(&chars[i])
+                && i + 1 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+            {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if digit_count >= MIN_DIGITS {
             out.push_str("<redacted>");
         } else {
-            out.push_str(&digits);
+            out.extend(&chars[start..i]);
         }
-        digits.clear();
-        out.push(ch);
-    }
-    if digits.len() >= MIN_REDACTED_RUN {
-        out.push_str("<redacted>");
-    } else {
-        out.push_str(&digits);
     }
     out
 }

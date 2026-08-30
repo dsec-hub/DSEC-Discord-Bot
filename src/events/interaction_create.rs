@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
-    Data, Error, redact_digits,
+    Data, Error,
     commands::{
         mods_only::log_embed,
         verification::{StudentRow, VerificationModal},
     },
+    redact_digits,
 };
 use ::serenity::{
     all::{
@@ -179,6 +180,10 @@ enum LinkOutcome {
     /// This caller's Discord account is already linked to a *different* student id, so
     /// it may not claim another. The stale-row / hijack path (SEC-19 #2).
     RefusedCallerLinked,
+    /// A `UNIQUE(student_id)` violation fired but the owner could not be resolved
+    /// afterwards (the winning row vanished, or the violation came from a different
+    /// constraint). This is an infrastructure refusal — never a success (SEC-19 #3).
+    RefusedUnresolved,
 }
 
 /// Add to dsec_discord_members table.
@@ -199,7 +204,9 @@ async fn add_dsec_discord_table(
         if &existing_discord_id == member_id {
             return Ok(LinkOutcome::Linked); // idempotent: caller already holds this id
         }
-        return Ok(LinkOutcome::RefusedIdClaimed { existing_discord_id });
+        return Ok(LinkOutcome::RefusedIdClaimed {
+            existing_discord_id,
+        });
     }
 
     // 2. Submitted id is unowned. If this caller already holds a DIFFERENT id, refuse:
@@ -231,15 +238,17 @@ async fn add_dsec_discord_table(
         // A UNIQUE(student_id) violation means another account inserted the same id
         // between our check and our insert. Re-query the owner and refuse — never
         // surface the raw 23505 body, which echoes the student id (SEC-19 #3, #4).
-        Err(err) if is_unique_violation(&err) => {
-            match student_id_owner(data, student_id).await? {
-                Some(owner) if &owner != member_id => {
-                    Ok(LinkOutcome::RefusedIdClaimed { existing_discord_id: owner })
-                }
-                // The winning row is ours (or has since vanished): treat as linked.
-                _ => Ok(LinkOutcome::Linked),
-            }
-        }
+        // This must FAIL CLOSED: only a re-query that proves the winning row is ours
+        // grants the role. A different owner is a conflict; an owner that cannot be
+        // resolved (row already gone, or a violation from a different constraint) is an
+        // infrastructure refusal — never a silent success (SEC-19 #3).
+        Err(err) if is_unique_violation(&err) => match student_id_owner(data, student_id).await? {
+            Some(owner) if &owner == member_id => Ok(LinkOutcome::Linked),
+            Some(owner) => Ok(LinkOutcome::RefusedIdClaimed {
+                existing_discord_id: owner,
+            }),
+            None => Ok(LinkOutcome::RefusedUnresolved),
+        },
         Err(err) => Err(err.into()),
     }
 }
@@ -265,10 +274,11 @@ async fn student_id_owner(data: &Data, student_id: &str) -> Result<Option<String
 
 /// A name-matched attempt: try to link the account and grant the role.
 ///
-/// Returns `true` when the role was granted, `false` when the link was refused (an
-/// ownership conflict or a caller already linked to a different id). On refusal the
-/// caller records exactly one failed attempt (SEC-19 #6); the user sees the generic
-/// embed either way. All responses edit the deferred ephemeral (SEC-19 #7).
+/// On any refusal (ownership conflict, caller already linked to a different id, or an
+/// unresolved unique-violation) this records exactly one failed attempt **before** the
+/// fallible Discord reply, so a refusal always counts even if the edit is lost (SEC-19
+/// #6); a successful grant counts none. The user sees the generic embed on every
+/// refusal, and all replies edit the deferred ephemeral (SEC-19 #7).
 async fn link_and_grant(
     ctx: &Context,
     data: &Data,
@@ -276,8 +286,9 @@ async fn link_and_grant(
     discord_member: &Member,
     student_id: &str,
     verified_role_id: RoleId,
-) -> Result<bool, Error> {
-    let member_id = discord_member.user.id.to_string();
+) -> Result<(), Error> {
+    let user_id = discord_member.user.id;
+    let member_id = user_id.to_string();
 
     match add_dsec_discord_table(data, student_id, &member_id).await? {
         LinkOutcome::Linked => {
@@ -287,19 +298,26 @@ async fn link_and_grant(
                 verified_role_id
             ));
             edit_reply(ctx, modal_submit, embed).await?;
-            Ok(true)
         }
-        LinkOutcome::RefusedIdClaimed { existing_discord_id } => {
+        LinkOutcome::RefusedIdClaimed {
+            existing_discord_id,
+        } => {
+            record_failure(&data.state.verify_attempts, user_id);
             log_link_conflict(ctx, data, &member_id, &existing_discord_id).await;
             edit_reply(ctx, modal_submit, verification_failed_embed()).await?;
-            Ok(false)
         }
         LinkOutcome::RefusedCallerLinked => {
+            record_failure(&data.state.verify_attempts, user_id);
             log_caller_already_linked(ctx, data, &member_id).await;
             edit_reply(ctx, modal_submit, verification_failed_embed()).await?;
-            Ok(false)
+        }
+        LinkOutcome::RefusedUnresolved => {
+            record_failure(&data.state.verify_attempts, user_id);
+            log_unresolved_conflict(ctx, data, &member_id).await;
+            edit_reply(ctx, modal_submit, verification_failed_embed()).await?;
         }
     }
+    Ok(())
 }
 
 /// Lower-case, trim, and collapse runs of internal whitespace to one space.
@@ -312,15 +330,13 @@ fn normalise_name(raw: &str) -> String {
         .join(" ")
 }
 
-/// Trim, lower-case, strip a leading "s", and drop spaces so a pasted
-/// "s123 456 789 " looks up as "123456789".
+/// Reduce a submitted student id to digits only, so "s123456789", "S123-456-789" and
+/// "123 456 789" all look up as "123456789". Keeping *only* digits (rather than just
+/// stripping spaces and a leading "s") is deliberate: the normalised value is what
+/// goes into the PostgREST query, so this guarantees no separator-punctuated form of
+/// a submitted id can survive into an error URL and thence a log line (SEC-19 #4).
 fn normalise_student_id(raw: &str) -> String {
-    let lowered: String = raw
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_lowercase();
-    lowered.strip_prefix('s').unwrap_or(&lowered).to_string()
+    raw.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
 /// Whether the submitted name matches the roster name closely enough to be the
@@ -450,6 +466,22 @@ async fn log_caller_already_linked(ctx: &Context, data: &Data, member_id: &str) 
     .await;
 }
 
+/// Log a unique-violation whose owner could not be resolved: the insert hit a
+/// `UNIQUE` constraint but a follow-up owner lookup found no row, so the attempt was
+/// refused rather than granted. Worth a mod's eye — it can indicate a race or a
+/// constraint firing for a reason we did not expect (SEC-19 #3).
+async fn log_unresolved_conflict(ctx: &Context, data: &Data, member_id: &str) {
+    log_verify_audit(
+        ctx,
+        data,
+        "Verification refused: unresolved unique violation",
+        format!(
+            "<@{member_id}> (id `{member_id}`) hit a unique-constraint violation whose owner could not be resolved; refused (not granted). Investigate if this recurs."
+        ),
+    )
+    .await;
+}
+
 /// Log a student-id link conflict to the logs channel with BOTH Discord ids and no
 /// student id (SEC-19): someone tried to verify with a student id already linked to
 /// a different Discord account.
@@ -489,19 +521,25 @@ async fn handle_verify(
     component_interaction: &ComponentInteraction,
     data: &Data,
 ) -> Result<(), Error> {
-    let Some(guild_id) = component_interaction.guild_id else {
+    // AuthZ (SEC-19 merge-blocker): this handler queries live Supabase, inserts a link
+    // row over real PII, and grants the DSEC role — so it must run in the configured
+    // DSEC guild specifically, not merely "some guild". The bot may be in other guilds;
+    // a foreign `/verify` button must never reach the database. Bounce anything else
+    // before any query. (The button carries no state, so this is the only gate.)
+    let guild_id = data.state.guild_id;
+    if component_interaction.guild_id != Some(guild_id) {
         component_interaction
             .create_response(
                 ctx,
                 ephemeral_embed(
                     CreateEmbed::new()
                         .title("Unable to perform action")
-                        .description("Action can only be performed in the DSEC server"),
+                        .description("Verification can only be performed in the DSEC server."),
                 ),
             )
             .await?;
         return Ok(());
-    };
+    }
 
     let verified_role_id = data.state.verified_role_id;
 
@@ -535,13 +573,16 @@ async fn handle_verify(
     // Acknowledge the modal submission within Discord's ~3s window BEFORE any database
     // or logs-channel work, so a slow query can never leave a dead "This interaction
     // failed" and a mutation can never happen with no ack (SEC-19 #7). Every later
-    // reply edits this deferred ephemeral response.
+    // reply edits this deferred ephemeral response. If the defer itself fails the
+    // interaction is already dead — ABORT before any query so we never mutate state
+    // (insert a link row, grant a role) against an un-acknowledged interaction.
     if let Err(err) = modal_submit.defer_ephemeral(ctx).await {
         eprintln!(
             "[verify] defer failed for interaction {}: {}",
             modal_submit.id,
             redact_digits(&err.to_string())
         );
+        return Ok(());
     }
 
     // Serialize all verification work for THIS user, held across the whole attempt, so
@@ -576,8 +617,10 @@ async fn handle_verify(
 
         if name_matches(&student.full_name, &modal_data.name) {
             // Fetch the guild member only once we know we may grant the role.
+            // `link_and_grant` records its own failure (before its fallible reply) on a
+            // refused link, so a refusal always counts even if the edit is lost (#6).
             let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
-            let granted = link_and_grant(
+            link_and_grant(
                 ctx,
                 data,
                 &modal_submit,
@@ -586,12 +629,6 @@ async fn handle_verify(
                 verified_role_id,
             )
             .await?;
-            // A refused link (ownership conflict, or a caller already linked to a
-            // different id) counts as exactly one failed attempt (SEC-19 #6); a
-            // successful grant counts none.
-            if !granted {
-                record_failure(&data.state.verify_attempts, user_id);
-            }
         } else {
             record_failure(&data.state.verify_attempts, user_id);
             log_verification_failure(ctx, data, user_id).await;
@@ -614,10 +651,12 @@ async fn handle_verify(
         let _ = edit_reply(
             ctx,
             &modal_submit,
-            CreateEmbed::new().title("Something went wrong").description(format!(
-                "A maintainer has been notified. Please try again in a minute. (ref: {})",
-                modal_submit.id
-            )),
+            CreateEmbed::new()
+                .title("Something went wrong")
+                .description(format!(
+                    "A maintainer has been notified. Please try again in a minute. (ref: {})",
+                    modal_submit.id
+                )),
         )
         .await;
     }
@@ -686,6 +725,10 @@ mod tests {
         assert_eq!(normalise_student_id("s123456789 "), "123456789");
         assert_eq!(normalise_student_id("S123456789"), "123456789");
         assert_eq!(normalise_student_id(" 123 456 789 "), "123456789");
+        // Punctuated forms are reduced to digits only, so no separator survives into a
+        // query URL / log line (SEC-19 #4).
+        assert_eq!(normalise_student_id("s123-456-789"), "123456789");
+        assert_eq!(normalise_student_id("123.456.789"), "123456789");
     }
 
     #[test]
@@ -721,8 +764,15 @@ mod tests {
             redact_digits("Key (student_id)=(220123456) already exists"),
             "Key (student_id)=(<redacted>) already exists"
         );
-        // Short runs (< 7 digits, e.g. the SQLSTATE code itself) are preserved.
+        // Punctuated ids are masked as one unit, not left half-visible (SEC-19 #4).
+        assert_eq!(
+            redact_digits("student_id=eq.123-456-789&x=1"),
+            "student_id=eq.<redacted>&x=1"
+        );
+        assert_eq!(redact_digits("id 123.456.789 seen"), "id <redacted> seen");
+        // Short runs (< 7 digits, e.g. the SQLSTATE code or v1.2.3) are preserved.
         assert_eq!(redact_digits("code 23505"), "code 23505");
+        assert_eq!(redact_digits("version v1.2.3"), "version v1.2.3");
         assert_eq!(redact_digits("no digits here"), "no digits here");
     }
 }
