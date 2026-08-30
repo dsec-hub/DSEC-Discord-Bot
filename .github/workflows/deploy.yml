@@ -42,6 +42,23 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           sudo docker compose up -d --build --force-recreate
+          echo "Container created."
+
+      # `docker compose up -d` exits 0 once the container is created, not once the
+      # program inside is running. The bot can panic at boot (a bad .env value, a
+      # Supabase hiccup) and exit within a second while the deploy still goes green.
+      # Assert the container is actually alive, and surface its logs if not (OPS-04).
+      - name: Verify the bot is still running
+        working-directory: ${{ github.workspace }}
+        run: |
+          sleep 30
+          id=$(sudo docker compose ps -q dsec_bot)
+          running=$(sudo docker inspect -f '{{.State.Running}}' "$id")
+          if [ "$running" != "true" ]; then
+            echo "::error::dsec_bot is not running 30s after deploy"
+            sudo docker compose logs --tail=100 dsec_bot
+            exit 1
+          fi
           echo "Deployment complete."
 
       - name: Remove environment file

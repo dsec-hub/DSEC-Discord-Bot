@@ -1,5 +1,12 @@
 services:
   dsec_bot:
     build: .
+    # Bring the bot back on process exit — a panic, a bad Discord frame, or a VPS
+    # reboot — instead of leaving it dead until someone notices (OPS-04). No
+    # `healthcheck:` block: the runtime image is debian:bookworm-slim with only
+    # ca-certificates (no ps/curl) and the bot serves no HTTP port, so there is
+    # nothing to probe; `restart: unless-stopped` acts on process exit, which is
+    # exactly the failure mode here. Do not add one.
+    restart: unless-stopped
     env_file:
       - .env

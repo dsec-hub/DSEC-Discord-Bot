@@ -150,6 +150,16 @@ async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
 
 #[tokio::main]
 async fn main() {
+    // Initialise logging first, before anything can log. Default to `info`:
+    // supabase-lib-rs logs generated query URLs (containing student IDs) and the
+    // service-account email at `debug`, so RUST_LOG must never be set to debug or
+    // trace on the VPS. See OPS-04 and the README.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
     dotenv().ok(); // load env
 
     let app_state = AppState::new()

@@ -1,4 +1,8 @@
-FROM rust:trixie AS builder
+# Pin the builder to the same Debian release as the runtime (bookworm). A binary
+# built on a newer release can die at exec on the older one the day a dependency
+# reaches for a newer glibc/OpenSSL symbol — with no log and, before OPS-04, no
+# restart. Keep this in lockstep with the runtime FROM below.
+FROM rust:1-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && \
