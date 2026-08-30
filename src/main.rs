@@ -1,6 +1,6 @@
 use dotenv::dotenv;
 use poise::serenity_prelude as serenity;
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 use supabase::prelude::Client;
 mod commands;
 mod events;
@@ -18,7 +18,14 @@ type ApplicationContext<'a> = poise::ApplicationContext<'a, Data, Error>;
 #[derive(Debug)]
 pub struct AppState {
     pub supabase: Client,
-    pub student_cache: Mutex<HashMap<String, String>>,
+    // SEC-19: per-Discord-user failed-verification counter. `(failures, window_start)`
+    // keyed by user id; once `failures` hits the limit inside the window the verify
+    // handler refuses the attempt with no database round trip. The old
+    // `student_cache` was removed: it was consulted *before* the only query carrying
+    // the `membership_status = "Active"` filter, had no TTL and was never evicted, so
+    // in a long-lived container it was a stale-membership bypass. One query per verify
+    // is not a performance problem.
+    pub verify_attempts: Mutex<HashMap<serenity::UserId, (u32, Instant)>>,
     // Parsed once at boot. Re-reading these per event means a config typo takes
     // down a handler at some random future moment instead of failing the deploy.
     pub guild_id: serenity::GuildId,
@@ -98,7 +105,7 @@ impl AppState {
 
         Ok(Self {
             supabase: client,
-            student_cache: Mutex::new(HashMap::new()),
+            verify_attempts: Mutex::new(HashMap::new()),
             guild_id: serenity::GuildId::new(guild_id),
             honeypot_channel_id: serenity::ChannelId::new(honeypot_channel_id),
             leetcode_channel_id: serenity::ChannelId::new(leetcode_channel_id),

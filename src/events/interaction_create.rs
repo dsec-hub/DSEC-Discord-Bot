@@ -1,13 +1,18 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::{
     Data, Error,
-    commands::verification::{StudentRow, VerificationModal},
+    commands::{
+        mods_only::log_embed,
+        verification::{StudentRow, VerificationModal},
+    },
 };
 use ::serenity::{
     all::{
-        ComponentInteraction, Context, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
-        CreateInteractionResponseMessage, GuildId, ModalInteraction, RoleId,
+        ComponentInteraction, Context, CreateEmbed, CreateInteractionResponse,
+        CreateInteractionResponseMessage, GuildId, ModalInteraction, RoleId, UserId,
         collector::ModalInteractionCollector,
     },
     model::guild::Member,
@@ -29,6 +34,52 @@ fn ephemeral_embed(embed: CreateEmbed) -> CreateInteractionResponse {
             .add_embed(embed)
             .ephemeral(true),
     )
+}
+
+/// The single verification-failure embed (SEC-19).
+///
+/// Every failure path — student id not on the roster, name mismatch, rate-limit
+/// refusal, and a student id already claimed by a different Discord account —
+/// renders this exact embed. Because there is one constructor the responses cannot
+/// drift apart, so the flow can no longer be used as an oracle for whether a given
+/// student id holds an Active DSEC membership.
+fn verification_failed_embed() -> CreateEmbed {
+    CreateEmbed::new().title("Verification failed").description(
+        "We couldn't verify that name and student ID. Check both and try again — it can take up to a week after signing up for your membership to appear.",
+    )
+}
+
+/// After this many failed attempts inside `ATTEMPT_WINDOW`, a user is refused with
+/// no database round trip. Kept deliberately generous — a real member fixing a typo
+/// in a hyphenated name must not be locked out — and the counter only moves on a
+/// genuine failure (SEC-19).
+const MAX_FAILURES: u32 = 5;
+const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+/// Per-Discord-user failed-verification counter: `(failures, window_start)`.
+type AttemptMap = Mutex<HashMap<UserId, (u32, Instant)>>;
+
+/// Whether `user_id` has already failed `MAX_FAILURES` times within the current
+/// window. A window that has fully elapsed is treated as no failures.
+fn is_rate_limited(attempts: &AttemptMap, user_id: UserId) -> bool {
+    let attempts = attempts.lock().expect("verify_attempts mutex poisoned");
+    matches!(
+        attempts.get(&user_id),
+        Some((count, window_start))
+            if *count >= MAX_FAILURES && window_start.elapsed() < ATTEMPT_WINDOW
+    )
+}
+
+/// Record one failed verification attempt for `user_id`, starting a fresh window if
+/// the previous one has elapsed (or none existed).
+fn record_failure(attempts: &AttemptMap, user_id: UserId) {
+    let mut attempts = attempts.lock().expect("verify_attempts mutex poisoned");
+    match attempts.get_mut(&user_id) {
+        Some(entry) if entry.1.elapsed() < ATTEMPT_WINDOW => entry.0 += 1,
+        _ => {
+            attempts.insert(user_id, (1, Instant::now()));
+        }
+    }
 }
 
 /// Show the verification modal and wait for (and parse) the submission.
@@ -71,14 +122,35 @@ async fn collect_verification_modal(
     }
 }
 
-/// Add to dsec_discord_members table (skips insert if already recorded).
+/// Outcome of trying to link a Discord account to a student id.
+enum LinkOutcome {
+    /// The row now exists for this Discord id (freshly inserted, or already present).
+    Linked,
+    /// The student id is already held by a *different* Discord account; nothing was
+    /// written. Carries that other Discord id so the caller can log the conflict.
+    Refused { existing_discord_id: String },
+}
+
+/// Add to dsec_discord_members table.
+///
+/// Idempotent for a Discord id that is already recorded. Refuses when the student id
+/// is already claimed by a *different* Discord account (SEC-19): the durable fix is a
+/// `UNIQUE` constraint on `dsec_discord_members.student_id`, but that DDL needs a
+/// duplicate sweep on live Supabase first (an owner step), so this application-level
+/// check is the safety net until then.
 async fn add_dsec_discord_table(
     data: &Data,
     student_id: &str,
     member_id: &String,
-) -> Result<(), Error> {
+) -> Result<LinkOutcome, Error> {
     if member_recorded(data, member_id).await? {
-        return Ok(());
+        return Ok(LinkOutcome::Linked);
+    }
+
+    if let Some(existing_discord_id) = student_id_owner(data, student_id).await?
+        && &existing_discord_id != member_id
+    {
+        return Ok(LinkOutcome::Refused { existing_discord_id });
     }
 
     let new_member = serde_json::json!({
@@ -101,10 +173,28 @@ async fn add_dsec_discord_table(
         .execute()
         .await?;
 
-    Ok(())
+    Ok(LinkOutcome::Linked)
 }
 
-/// Assign the verified role and send the success response.
+/// The Discord id currently linked to `student_id`, if any.
+async fn student_id_owner(data: &Data, student_id: &str) -> Result<Option<String>, Error> {
+    let rows: Vec<DiscordMemberRow> = data
+        .state
+        .supabase
+        .database()
+        .from("dsec_discord_members")
+        .select("student_id,discord_id")
+        .eq("student_id", student_id)
+        .execute()
+        .await?;
+    Ok(rows.into_iter().next().map(|row| row.discord_id))
+}
+
+/// Link the account, assign the verified role, and send the success response.
+///
+/// If the student id is already claimed by a different Discord account the link is
+/// refused: the caller sees the generic failure embed and the conflict is logged to
+/// the logs channel with both Discord ids (never the student id).
 async fn grant_verified_role(
     ctx: &Context,
     data: &Data,
@@ -112,22 +202,28 @@ async fn grant_verified_role(
     discord_member: &Member,
     student_id: &str,
     verified_role_id: RoleId,
-    via_cache: bool,
 ) -> Result<(), Error> {
-    add_dsec_discord_table(data, student_id, &discord_member.user.id.to_string()).await?;
-    discord_member.add_role(ctx, verified_role_id).await?;
+    let member_id = discord_member.user.id.to_string();
 
-    let mut embed = CreateEmbed::new().title("Verified ✅").description(format!(
-        "You have been assigned the <@&{}> role!",
-        verified_role_id
-    ));
-    if via_cache {
-        embed = embed.footer(CreateEmbedFooter::new("⚡ via cache"));
+    match add_dsec_discord_table(data, student_id, &member_id).await? {
+        LinkOutcome::Refused { existing_discord_id } => {
+            log_link_conflict(ctx, data, &member_id, &existing_discord_id).await;
+            modal_submit
+                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
+                .await?;
+        }
+        LinkOutcome::Linked => {
+            discord_member.add_role(ctx, verified_role_id).await?;
+
+            let embed = CreateEmbed::new().title("Verified ✅").description(format!(
+                "You have been assigned the <@&{}> role!",
+                verified_role_id
+            ));
+            modal_submit
+                .create_response(ctx, ephemeral_embed(embed))
+                .await?;
+        }
     }
-
-    modal_submit
-        .create_response(ctx, ephemeral_embed(embed))
-        .await?;
     Ok(())
 }
 
@@ -193,25 +289,6 @@ fn name_matches(roster: &str, submitted: &str) -> bool {
     true
 }
 
-/// Whether the cached name for `student_id` matches the submitted `name`.
-fn cached_name_matches(data: &Data, student_id: &str, name: &str) -> bool {
-    let cache = data
-        .state
-        .student_cache
-        .lock()
-        .expect("Failed to get cache");
-    match cache.get(student_id) {
-        Some(cached_name) => name_matches(cached_name, name),
-        None => false,
-    }
-}
-
-/// Store the resolved student name in the cache (normalised for comparison).
-fn cache_student(data: &Data, student_id: &str, full_name: &str) {
-    let mut cache = data.state.student_cache.lock().unwrap();
-    cache.insert(student_id.to_string(), normalise_name(full_name));
-}
-
 /// Look up a student by id in the database.
 async fn fetch_student(data: &Data, student_id: &str) -> Result<Option<StudentRow>, Error> {
     let student_data: Vec<StudentRow> = data
@@ -240,8 +317,66 @@ async fn member_recorded(data: &Data, user_id: &str) -> Result<bool, Error> {
     Ok(!rows.is_empty())
 }
 
+/// Log a failed verification to the logs channel. Records the Discord user id, a
+/// fixed reason category and a timestamp — NEVER the submitted name or student id.
+/// The logs channel is read by humans and persists forever, so nothing a member
+/// typed into the modal may go here (SEC-19). `reason` is always a fixed literal.
+async fn log_verification_failure(ctx: &Context, data: &Data, user_id: UserId, reason: &str) {
+    let _ = log_embed(
+        ctx,
+        data.state.logs_channel_id,
+        Some("Verification failed".to_string()),
+        None,
+        Some(format!("User <@{user_id}> (id `{user_id}`) — {reason}.")),
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+    )
+    .await;
+}
+
+/// Log a student-id link conflict to the logs channel with BOTH Discord ids and no
+/// student id (SEC-19): someone tried to verify with a student id already linked to
+/// a different Discord account.
+async fn log_link_conflict(
+    ctx: &Context,
+    data: &Data,
+    attempting_discord_id: &str,
+    existing_discord_id: &str,
+) {
+    let _ = log_embed(
+        ctx,
+        data.state.logs_channel_id,
+        Some("Verification refused: student id already linked".to_string()),
+        None,
+        Some(format!(
+            "<@{attempting_discord_id}> (id `{attempting_discord_id}`) tried to verify with a student id already linked to <@{existing_discord_id}> (id `{existing_discord_id}`)."
+        )),
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+    )
+    .await;
+}
+
+// TODO(SEC-19 follow-up): name + student id is not proof of ownership — both are
+// semi-public, so anyone who knows a classmate's name and id can verify as them.
+// The real fix is a possession proof: email a one-time code to the address on the
+// roster and require it back. dsec-app already owns OTP machinery, so the cheap
+// version is this bot calling dsec-api rather than growing its own email sender.
+// That is feature-sized work, tracked separately, not a patch to this handler.
+//
+// Owner-only DB step (NOT done here, needs a maintainer on live Supabase): sweep
+// for duplicates, then add `UNIQUE` on dsec_discord_members.student_id. See
+// SECURITY.md. The uniqueness check below is the application-level safety net until
+// that constraint exists.
+//
 /// Handle a click on the "verify" button: collect the modal, then verify the
-/// submitted student id/name against the cache and database.
+/// submitted student id/name against the database on every attempt.
 async fn handle_verify(
     ctx: &Context,
     component_interaction: &ComponentInteraction,
@@ -296,41 +431,34 @@ async fn handle_verify(
     let user_id = component_interaction.user.id;
 
     let verify_result: Result<(), Error> = async {
-        let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
-
-        let student_id = normalise_student_id(&modal_data.student_id);
-
-        if cached_name_matches(data, &student_id, &modal_data.name) {
-            grant_verified_role(
-                ctx,
-                data,
-                &modal_submit,
-                &discord_member,
-                &student_id,
-                verified_role_id,
-                true,
-            )
-            .await?;
+        // SEC-19: cap failed attempts before ANY database work. A user who has
+        // already failed too many times in the window gets the generic failure
+        // embed and no query runs.
+        if is_rate_limited(&data.state.verify_attempts, user_id) {
+            log_verification_failure(ctx, data, user_id, "rate-limited").await;
+            modal_submit
+                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
+                .await?;
             return Ok(());
         }
 
+        let student_id = normalise_student_id(&modal_data.student_id);
+
+        // `fetch_student` is the only query carrying `membership_status = "Active"`,
+        // and it now runs on every attempt before any role grant (SEC-19): no cache
+        // shortcut can admit a member whose membership has since lapsed.
         let Some(student) = fetch_student(data, &student_id).await? else {
+            record_failure(&data.state.verify_attempts, user_id);
+            log_verification_failure(ctx, data, user_id, "no matching active membership").await;
             modal_submit
-                .create_response(
-                    ctx,
-                    ephemeral_embed(
-                        CreateEmbed::new().title("Student ID not found!").description(
-                            "Your student ID is not found.\nIt takes up to **a week** for your membership to be updated in the database since sign up.\nTry again later.",
-                        ),
-                    ),
-                )
+                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
                 .await?;
             return Ok(());
         };
 
-        cache_student(data, &student_id, &student.full_name);
-
         if name_matches(&student.full_name, &modal_data.name) {
+            // Only fetch the guild member once we know we are about to grant the role.
+            let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
             grant_verified_role(
                 ctx,
                 data,
@@ -338,17 +466,13 @@ async fn handle_verify(
                 &discord_member,
                 &student_id,
                 verified_role_id,
-                false,
             )
             .await?;
         } else {
+            record_failure(&data.state.verify_attempts, user_id);
+            log_verification_failure(ctx, data, user_id, "name mismatch").await;
             modal_submit
-                .create_response(
-                    ctx,
-                    ephemeral_embed(CreateEmbed::new().title("Name mismatch ❌").description(
-                        "Your student ID is present, however the name does not match. Try again.",
-                    )),
-                )
+                .create_response(ctx, ephemeral_embed(verification_failed_embed()))
                 .await?;
         }
 
@@ -438,5 +562,26 @@ mod tests {
         assert_eq!(normalise_student_id("s123456789 "), "123456789");
         assert_eq!(normalise_student_id("S123456789"), "123456789");
         assert_eq!(normalise_student_id(" 123 456 789 "), "123456789");
+    }
+
+    #[test]
+    fn rate_limits_after_max_failures() {
+        let attempts: AttemptMap = Mutex::new(HashMap::new());
+        let user = UserId::new(1);
+
+        // A fresh user is never limited.
+        assert!(!is_rate_limited(&attempts, user));
+
+        // The first MAX_FAILURES attempts are allowed through (they still hit the DB).
+        for _ in 0..MAX_FAILURES {
+            assert!(!is_rate_limited(&attempts, user));
+            record_failure(&attempts, user);
+        }
+
+        // The next attempt (the 6th, with MAX_FAILURES == 5) is refused with no query.
+        assert!(is_rate_limited(&attempts, user));
+
+        // A different user is unaffected.
+        assert!(!is_rate_limited(&attempts, UserId::new(2)));
     }
 }
