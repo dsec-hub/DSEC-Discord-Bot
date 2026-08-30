@@ -1,5 +1,4 @@
 use crate::{Context, Error};
-use dotenv::dotenv;
 use poise::{CreateReply, serenity_prelude as serenity};
 
 /// Send message to logs channel
@@ -8,6 +7,7 @@ use poise::{CreateReply, serenity_prelude as serenity};
 #[allow(clippy::too_many_arguments)]
 pub async fn log_embed(
     ctx: &serenity::Context,
+    logs_channel_id: serenity::ChannelId,
     title: Option<String>,
     title_url: Option<String>,
     description: Option<String>,
@@ -17,7 +17,6 @@ pub async fn log_embed(
     image_url: Option<String>,
     timestamp: Option<bool>,
 ) -> Result<(), Error> {
-    dotenv().ok();
     let mut embed = serenity::CreateEmbed::new();
 
     // Set title and title URL
@@ -60,12 +59,7 @@ pub async fn log_embed(
         embed = embed.timestamp(serenity::Timestamp::now());
     }
 
-    // Send the embed
-    let logs_channel_id_env = std::env::var("LOGS_CHANNEL_ID")
-        .expect("missing LOGS_CHANNEL_ID")
-        .parse::<u64>()
-        .expect("Invalid LOGS_CHANNEL_ID value");
-    let logs_channel_id = serenity::ChannelId::new(logs_channel_id_env);
+    // Send the embed (logs_channel_id is parsed once at boot; see AppState).
     let builder = serenity::CreateMessage::new().embed(embed);
 
     let send_log = logs_channel_id.send_message(ctx, builder).await;

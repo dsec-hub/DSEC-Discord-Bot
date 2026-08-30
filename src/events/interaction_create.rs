@@ -12,7 +12,6 @@ use ::serenity::{
     },
     model::guild::Member,
 };
-use dotenv::dotenv;
 use poise::Modal as _;
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
@@ -21,16 +20,6 @@ use serde::{Deserialize, Serialize};
 pub struct DiscordMemberRow {
     pub student_id: String,
     pub discord_id: String,
-}
-
-/// Read the verified role id from the environment.
-fn verified_role_id() -> RoleId {
-    dotenv().ok();
-    let role_id_string = std::env::var("VERIFIED_ROLE_ID").expect("missing VERIFIED_ROLE_ID");
-    let role_id_u64: u64 = role_id_string
-        .parse()
-        .expect("Unable to parse VERIFIED_ROLE_ID into number");
-    RoleId::new(role_id_u64)
 }
 
 /// Wrap an embed into an ephemeral interaction response.
@@ -204,7 +193,7 @@ async fn handle_verify(
         return Ok(());
     };
 
-    let verified_role_id = verified_role_id();
+    let verified_role_id = data.state.verified_role_id;
 
     // Fast, no-network "already verified" check using the member data that is
     // already attached to the button interaction. Anything slower than this

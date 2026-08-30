@@ -80,3 +80,14 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      # COL-BOT-05: configuration is parsed once in main.rs and stored on
+      # AppState. A per-event dotenv()/env::var read is a data race under the
+      # multi-threaded runtime (set_var is unsafe in edition 2024) and turns a
+      # config typo into a random future handler failure instead of a boot error.
+      - name: No environment reads outside main.rs
+        run: |
+          if grep -rn 'dotenv()\|env::var' src/ | grep -v '^src/main.rs:'; then
+            echo "::error::Environment variables must be read once in main.rs and stored on AppState."
+            exit 1
+          fi

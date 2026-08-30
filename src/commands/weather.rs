@@ -2,9 +2,7 @@ use crate::{Context, Error};
 use poise::CreateReply;
 use serenity::{all::CreateEmbed, json::Value};
 
-async fn get_weather(location: String) -> Result<String, Error> {
-    let weather_api_key = std::env::var("WEATHER_TOKEN").expect("missing WEATHER_TOKEN");
-
+async fn get_weather(location: String, weather_api_key: &str) -> Result<String, Error> {
     let request_url = format!(
         "https://api.weatherapi.com/v1/current.json?key={key}&q={location}",
         key = weather_api_key,
@@ -23,7 +21,7 @@ pub async fn weather(
     ctx: Context<'_>,
     #[description = "Location (City or Country)"] location: String,
 ) -> Result<(), Error> {
-    let weather_response = get_weather(location).await?;
+    let weather_response = get_weather(location, &ctx.data().state.weather_token).await?;
     let value: Value = serde_json::from_str(&weather_response)?;
 
     let location_name = value["location"]["name"].as_str().unwrap();

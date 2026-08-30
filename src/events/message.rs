@@ -1,21 +1,13 @@
-use crate::{Error, commands::mods_only::log_embed};
-use ::serenity::model::id::{ChannelId, GuildId};
-use dotenv::dotenv;
+use crate::{Data, Error, commands::mods_only::log_embed};
 use poise::serenity_prelude as serenity;
 
-async fn honeypot(ctx: &serenity::Context, new_message: &serenity::Message) -> Result<(), Error> {
-    dotenv().ok();
-    // check if it's the honeypot channel
-    let discord_guild_id = std::env::var("GUILD_ID")
-        .expect("missing GUILD_ID")
-        .parse::<u64>()
-        .expect("Invalid GUILD_ID value");
-
-    let honeypot_channel_id_env = std::env::var("HONEYPOT_CHANNEL_ID")
-        .expect("missing HONEYPOT_CHANNEL_ID")
-        .parse::<u64>()
-        .expect("Invalid HONEYPOT_CHANNEL_ID value");
-    let honeypot_channel_id = ChannelId::new(honeypot_channel_id_env);
+async fn honeypot(
+    ctx: &serenity::Context,
+    new_message: &serenity::Message,
+    data: &Data,
+) -> Result<(), Error> {
+    // Config is parsed once at boot and stored on AppState (COL-BOT-05).
+    let honeypot_channel_id = data.state.honeypot_channel_id;
     let current_channel_id = &new_message.channel_id;
 
     if honeypot_channel_id.eq(current_channel_id) {
@@ -23,13 +15,16 @@ async fn honeypot(ctx: &serenity::Context, new_message: &serenity::Message) -> R
         let username = &user.name;
         let user_id = &user.id;
         let avatar_url = user.avatar_url();
-        let ban_user = GuildId::new(discord_guild_id)
+        let ban_user = data
+            .state
+            .guild_id
             .ban_with_reason(ctx, user_id, 2, "Message sent in honeypot channel.")
             .await;
 
         if ban_user.is_ok() {
             log_embed(
                 ctx,
+                data.state.logs_channel_id,
                 Some("Honeypot activated!".to_string()),
                 None,
                 Some(format!("User got banned: {}", username)),
@@ -49,15 +44,9 @@ async fn honeypot(ctx: &serenity::Context, new_message: &serenity::Message) -> R
 async fn create_leetcode_thread(
     ctx: &serenity::Context,
     new_message: &serenity::Message,
+    data: &Data,
 ) -> Result<(), Error> {
-    dotenv().ok();
-
-    let leetcode_channel_id_env = std::env::var("LEETCODE_CHANNEL_ID")
-        .expect("missing LEETCODE_CHANNEL_ID")
-        .parse::<u64>()
-        .expect("Invalid LEETCODE_CHANNEL_ID value");
-
-    let leetcode_channel_id = ChannelId::new(leetcode_channel_id_env);
+    let leetcode_channel_id = data.state.leetcode_channel_id;
 
     let current_channel_id = &new_message.channel_id;
 
@@ -93,8 +82,9 @@ async fn create_leetcode_thread(
 pub async fn on_message(
     ctx: &serenity::Context,
     new_message: &serenity::Message,
+    data: &Data,
 ) -> Result<(), Error> {
-    honeypot(ctx, new_message).await?;
-    create_leetcode_thread(ctx, new_message).await?;
+    honeypot(ctx, new_message, data).await?;
+    create_leetcode_thread(ctx, new_message, data).await?;
     Ok(())
 }
