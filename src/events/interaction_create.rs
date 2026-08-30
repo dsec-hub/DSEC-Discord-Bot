@@ -131,6 +131,50 @@ async fn grant_verified_role(
     Ok(())
 }
 
+/// Lower-case, trim, and collapse runs of internal whitespace to one space.
+/// Used for every name comparison so a stray space or a double space in the
+/// DUSA roster never rejects a real member.
+fn normalise_name(raw: &str) -> String {
+    raw.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Trim, lower-case, strip a leading "s", and drop spaces so a pasted
+/// "s123 456 789 " looks up as "123456789".
+fn normalise_student_id(raw: &str) -> String {
+    let lowered: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    lowered.strip_prefix('s').unwrap_or(&lowered).to_string()
+}
+
+/// True when the submitted name is the roster name, or every word the student
+/// typed appears in the roster name in the same order. Lets "John Doe" match a
+/// roster row of "John Michael Doe" without matching an unrelated person.
+fn name_matches(roster: &str, submitted: &str) -> bool {
+    let roster = normalise_name(roster);
+    let submitted = normalise_name(submitted);
+    if submitted.is_empty() {
+        return false;
+    }
+    if roster == submitted {
+        return true;
+    }
+    let roster_words: Vec<&str> = roster.split(' ').collect();
+    let mut idx = 0usize;
+    for word in submitted.split(' ') {
+        match roster_words[idx..].iter().position(|w| *w == word) {
+            Some(offset) => idx += offset + 1,
+            None => return false,
+        }
+    }
+    true
+}
+
 /// Whether the cached name for `student_id` matches the submitted `name`.
 fn cached_name_matches(data: &Data, student_id: &str, name: &str) -> bool {
     let cache = data
@@ -139,15 +183,15 @@ fn cached_name_matches(data: &Data, student_id: &str, name: &str) -> bool {
         .lock()
         .expect("Failed to get cache");
     match cache.get(student_id) {
-        Some(cached_name) => cached_name == &name.to_lowercase(),
+        Some(cached_name) => name_matches(cached_name, name),
         None => false,
     }
 }
 
-/// Store the resolved student name in the cache (lower-cased for comparison).
+/// Store the resolved student name in the cache (normalised for comparison).
 fn cache_student(data: &Data, student_id: &str, full_name: &str) {
     let mut cache = data.state.student_cache.lock().unwrap();
-    cache.insert(student_id.to_string(), full_name.to_lowercase());
+    cache.insert(student_id.to_string(), normalise_name(full_name));
 }
 
 /// Look up a student by id in the database.
@@ -236,18 +280,15 @@ async fn handle_verify(
     let verify_result: Result<(), Error> = async {
         let discord_member = GuildId::member(guild_id, ctx, user_id).await?;
 
-        let input_student_id = modal_data.student_id.to_lowercase();
-        let student_id = input_student_id
-            .strip_prefix("s")
-            .unwrap_or(&input_student_id);
+        let student_id = normalise_student_id(&modal_data.student_id);
 
-        if cached_name_matches(data, student_id, &modal_data.name) {
+        if cached_name_matches(data, &student_id, &modal_data.name) {
             grant_verified_role(
                 ctx,
                 data,
                 &modal_submit,
                 &discord_member,
-                student_id,
+                &student_id,
                 verified_role_id,
                 true,
             )
@@ -255,7 +296,7 @@ async fn handle_verify(
             return Ok(());
         }
 
-        let Some(student) = fetch_student(data, student_id).await? else {
+        let Some(student) = fetch_student(data, &student_id).await? else {
             modal_submit
                 .create_response(
                     ctx,
@@ -269,15 +310,15 @@ async fn handle_verify(
             return Ok(());
         };
 
-        cache_student(data, student_id, &student.full_name);
+        cache_student(data, &student_id, &student.full_name);
 
-        if student.full_name.to_lowercase() == modal_data.name.to_lowercase() {
+        if name_matches(&student.full_name, &modal_data.name) {
             grant_verified_role(
                 ctx,
                 data,
                 &modal_submit,
                 &discord_member,
-                student_id,
+                &student_id,
                 verified_role_id,
                 false,
             )
@@ -332,4 +373,35 @@ pub async fn on_interaction_create(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trims_and_collapses_names() {
+        assert!(name_matches("John Doe", "  john   doe  "));
+        assert!(name_matches("John Doe", "JOHN DOE"));
+    }
+
+    #[test]
+    fn allows_a_missing_middle_name() {
+        assert!(name_matches("John Michael Doe", "John Doe"));
+        assert!(name_matches("John Michael Doe", "john michael doe"));
+    }
+
+    #[test]
+    fn rejects_a_different_person() {
+        assert!(!name_matches("John Michael Doe", "Jane Doe"));
+        assert!(!name_matches("John Doe", "Doe John"));
+        assert!(!name_matches("John Doe", ""));
+    }
+
+    #[test]
+    fn normalises_student_ids() {
+        assert_eq!(normalise_student_id("s123456789 "), "123456789");
+        assert_eq!(normalise_student_id("S123456789"), "123456789");
+        assert_eq!(normalise_student_id(" 123 456 789 "), "123456789");
+    }
 }
